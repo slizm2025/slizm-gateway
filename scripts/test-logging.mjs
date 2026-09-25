@@ -330,7 +330,7 @@ test('gw.js logs：本地时间、只看异常、持续跟随；start 前轮转�
     const currentDate = new Date('2026-09-25T01:52:25.814Z');
     const legacy = 'Error [ERR_HTTP_HEADERS_SENT]: Cannot write headers after they are sent to the client\n    at ServerResponse.writeHead (node:_http_server:356:11)\nNode.js v24.14.0\n';
     const current = `[${localStamp(currentDate.toISOString())}] 当前进程错误: CURRENT_FIXTURE_ERROR\n    at currentFixture (fixture.js:1:1)\n`;
-    let healthInfo = { service: 'claude-gateway', pid: 12345, startedAt };
+    let healthInfo = { service: 'slizm-gateway', pid: 12345, startedAt };
     let healthStatus = 200;
     const mock = http.createServer((req, res) => {
       res.writeHead(healthStatus, { 'content-type': 'application/json' });
@@ -375,7 +375,7 @@ test('gw.js logs：本地时间、只看异常、持续跟随；start 前轮转�
     });
     await t.test('无法确认网关实例或启动时间时保留错误线索', async () => {
       await seed(legacy, oldDate);
-      for (const info of [null, { service: 'claude-gateway', startedAt: 'invalid' }, { service: 'other-service', startedAt }]) {
+      for (const info of [null, { service: 'slizm-gateway', startedAt: 'invalid' }, { service: 'other-service', startedAt }]) {
         healthInfo = info;
         healthStatus = info === null ? 503 : 200;
         const shown = await gw('logs', '1');

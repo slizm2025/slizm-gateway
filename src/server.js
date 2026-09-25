@@ -340,7 +340,7 @@ async function routeRequest(req, res) {
   const path = new URL(req.url, 'http://localhost').pathname.replace(/\/+$/, '') || '/';
   if (req.method === 'GET' && (path === '/health' || path === '/')) {
     return json(res, 200, {
-      status: 'ok', service: 'claude-gateway', pid: process.pid, instanceId, startedAt: new Date(startedAt).toISOString(),
+      status: 'ok', service: 'slizm-gateway', pid: process.pid, instanceId, startedAt: new Date(startedAt).toISOString(),
       transport: 'node-http-connect-v2', uptimeSec: Math.round((Date.now() - startedAt) / 1000), activeRequests,
       routes: Object.fromEntries([...cfg.routes].map(([k, v]) => [k, `${v.provider}${v.model ? ` -> ${v.model}` : ''}`])),
       providers: [...cfg.providers.values()].map((p) => ({ name: p.name, apiType: p.apiType, baseUrl: p.baseUrl, key: p.apiKey ? '[已配置]' : '(未配置)' })),

@@ -130,7 +130,7 @@ test('isolated configuration and management commands', async (t) => {
     running = true;
     assert.ok(result.stdout.includes(`:${port}`), result.stdout);
     const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
-    assert.equal(health.service, 'claude-gateway');
+    assert.equal(health.service, 'slizm-gateway');
     assert.equal(health.transport, 'node-http-connect-v2');
     assert.equal(Number(await readFile(join(gateway, 'logs/gateway.pid'), 'utf8')), health.pid);
     const again = await run('scripts/gw.js', 'start');

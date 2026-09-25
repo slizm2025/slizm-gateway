@@ -153,7 +153,7 @@ async function cmdStart() {
   for (let i = 0; i < 40; i += 1) {
     await new Promise((r) => setTimeout(r, 250));
     const info = await health();
-    if (info?.service === 'claude-gateway' && info.pid === child.pid) { up = info; break; }
+    if (info?.service === 'slizm-gateway' && info.pid === child.pid) { up = info; break; }
     if (child.exitCode !== null) break;
   }
 
@@ -207,7 +207,7 @@ async function cmdStop() {
     return;
   }
   const info = await health();
-  if (info?.service !== 'claude-gateway' || info.pid !== pid) {
+  if (info?.service !== 'slizm-gateway' || info.pid !== pid) {
     console.log(paint(C.red, `拒绝停止：无法验证 pid ${pid} 属于当前网关。请检查进程命令行，旧版进程需手动停止。`));
     process.exitCode = 1;
     return;
@@ -511,7 +511,7 @@ async function cmdLogs() {
   if (options.mode !== 'raw' && existsSync(ERR_LOG) && statSync(ERR_LOG).size > 0) {
     const includeHistory = options.history;
     const info = await health();
-    const startedMs = info?.service === 'claude-gateway' && Number.isInteger(info.pid) && info.pid > 0 && typeof info.startedAt === 'string'
+    const startedMs = info?.service === 'slizm-gateway' && Number.isInteger(info.pid) && info.pid > 0 && typeof info.startedAt === 'string'
       ? Date.parse(info.startedAt) : NaN;
     const written = statSync(ERR_LOG).mtime;
     const lines = cleanLogText(readTail(ERR_LOG)).split(/\r?\n/).filter(Boolean);

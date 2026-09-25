@@ -1,4 +1,6 @@
-# Claude Code 多 provider 网关
+# slizm-gateway
+
+Claude Code 多 provider 网关
 
 让 Claude Code 在**同一个会话**里同时使用多个 provider、多套 API key。
 
@@ -109,7 +111,7 @@ node src/server.js
 后台常驻（你已装 pm2）：
 
 ```bash
-pm2 start src/server.js --name cc-gateway
+pm2 start src/server.js --name slizm-gateway
 pm2 save
 ```
 
