@@ -1,0 +1,18 @@
+{
+  "clientToken": "sk-local-gateway-test",
+  "providers": [
+    {
+      "name": "relay",
+      "apiType": "anthropic",
+      "baseUrl": "https://api.shuaiapi.com",
+      "apiKey": "env:RELAY_KEY",
+      "authStyle": "auto",
+      "models": {}
+    }
+  ],
+  "routes": {
+    "opus": { "provider": "relay", "model": "claude-opus-5-5" },
+    "sonnet": { "provider": "relay", "model": "claude-sonnet-5" },
+    "haiku": { "provider": "relay", "model": "claude-haiku-4-5" }
+  }
+}

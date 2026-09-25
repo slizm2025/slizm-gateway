@@ -1,0 +1,23 @@
+{
+  "name": "claude-code-multi-provider-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "让 Claude Code 在同一个会话里按模型名分发到不同 provider（各自 base URL 与 API key）",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node scripts/gw.js start",
+    "stop": "node scripts/gw.js stop",
+    "restart": "node scripts/gw.js restart",
+    "status": "node scripts/gw.js status",
+    "logs": "node scripts/gw.js logs",
+    "gw": "node scripts/gw.js",
+    "selftest": "node scripts/gw.js test",
+    "test": "node --test scripts/test-audit.mjs scripts/test-runtime.mjs scripts/test-reference.mjs scripts/test-hardening.mjs scripts/test-usage.mjs scripts/test-logging.mjs && node scripts/test-limiter.mjs && node scripts/test-proxy-connect.mjs && node scripts/test-anthropic-compat.mjs && node scripts/test-codex-openai-adapter.mjs && node scripts/test-disconnect.mjs && node scripts/test-retry.mjs",
+    "serve": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

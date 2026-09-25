@@ -1,0 +1,21 @@
+{
+  "clientToken": "sk-e2e-test-token",
+  "providers": [
+    {
+      "name": "fake",
+      "apiType": "openai",
+      "baseUrl": "http://127.0.0.1:4998",
+      "apiKey": "sk-fake",
+      "authStyle": "bearer",
+      "models": {},
+      "maxConcurrency": 2,
+      "maxAttempts": 4
+    }
+  ],
+  "routes": {
+    "scout": {
+      "provider": "fake",
+      "model": "fake-model"
+    }
+  }
+}

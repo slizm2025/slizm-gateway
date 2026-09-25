@@ -1,0 +1,6 @@
+.env
+providers.json
+providers.local.json
+logs/
+node_modules/
+*.log
