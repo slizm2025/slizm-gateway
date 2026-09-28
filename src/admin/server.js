@@ -1,4 +1,4 @@
-// Local Web Admin Backend for Claude Gateway
+// Local Web Admin Backend for Slizm Gateway
 import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, renameSync, chmodSync } from 'node:fs';
@@ -469,7 +469,7 @@ if (isDirectRun) {
       try { if (existsSync(tmpFile)) unlinkSync(tmpFile); } catch {}
     }
 
-    console.log(`Claude Gateway Web Admin running at http://${host}:${actualPort}/`);
+    console.log(`Slizm Gateway Web Admin running at http://${host}:${actualPort}/`);
   });
   let fallbackUsed = false;
   server.on('error', (error) => {

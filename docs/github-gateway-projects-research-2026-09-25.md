@@ -263,7 +263,7 @@ Helicone 将 AI Gateway 与 LLM observability 合在一起：README 描述 100+ 
 - [latest release](https://github.com/Helicone/helicone/releases/latest)
 - [GitHub API 仓库快照](https://api.github.com/repos/Helicone/helicone)
 
-## 对当前 claude-gateway 的建议优先级
+## 对当前 slizm-gateway 的建议优先级
 
 ### P0：保持并强化当前本地网关的原生 Claude path
 

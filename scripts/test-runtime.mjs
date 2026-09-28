@@ -109,8 +109,10 @@ test('Gemini URLs, series adaptation and SSE aggregation remain compatible', asy
 
 test('isolated configuration and management commands', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'gw-management-'));
-  const gateway = join(dir, 'claude-gateway');
+  const gateway = join(dir, 'slizm-gateway');
+  const claudeConfigDir = join(dir, 'claude-config');
   await mkdir(join(gateway, 'scripts'), { recursive: true });
+  await mkdir(claudeConfigDir, { recursive: true });
   await cp(join(root, 'src'), join(gateway, 'src'), { recursive: true });
   await cp(join(root, 'scripts', 'gw.js'), join(gateway, 'scripts', 'gw.js'));
   await writeFile(join(gateway, 'package.json'), '{"type":"module"}');
@@ -122,7 +124,7 @@ test('isolated configuration and management commands', async (t) => {
   const cfg = { clientToken: 'fixture-client-token', providers: [{ name: 'p', apiType: 'openai', apiKey: 'fixture-key', baseUrl: 'http://127.0.0.1:1' }], routes: { fixture: 'p' } };
   await writeFile(cfgPath, JSON.stringify(cfg));
   await writeFile(join(gateway, '.env'), 'GATEWAY_PORT=1\n');
-  const env = { ...process.env, GATEWAY_PORT: String(port), GATEWAY_HOST: '127.0.0.1', GATEWAY_CONFIG: cfgPath, GATEWAY_WEB_ENABLED: '0' };
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: claudeConfigDir, GATEWAY_PORT: String(port), GATEWAY_HOST: '127.0.0.1', GATEWAY_CONFIG: cfgPath, GATEWAY_WEB_ENABLED: '0' };
   const run = (...args) => exec(process.execPath, args, { cwd: gateway, env, timeout: 15000, windowsHide: true });
   let running = false;
   t.after(async () => {
@@ -152,8 +154,8 @@ test('isolated configuration and management commands', async (t) => {
     running = false;
   });
   await t.test('mode changes validate destination and preserve valid direct backup', async () => {
-    const settings = join(dir, 'settings.json');
-    const stashed = join(dir, 'settings.json_gateway');
+    const settings = join(claudeConfigDir, 'settings.json');
+    const stashed = join(claudeConfigDir, 'settings.json_gateway');
     const direct = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://example.invalid' }, preserve: 1 });
     const local = JSON.stringify({ env: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}` }, preserve: 2 });
     await writeFile(settings, direct);
@@ -163,10 +165,10 @@ test('isolated configuration and management commands', async (t) => {
     await writeFile(stashed, local);
     await run('scripts/gw.js', 'mode', 'gateway');
     assert.equal(await readFile(settings, 'utf8'), local);
-    await writeFile(join(dir, 'settings.json.direct-backup-99999999-999999'), '{broken');
+    await writeFile(join(claudeConfigDir, 'settings.json.direct-backup-99999999-999999'), '{broken');
     await run('scripts/gw.js', 'mode', 'direct');
     assert.equal(await readFile(settings, 'utf8'), direct);
     assert.equal(await readFile(stashed, 'utf8'), local);
-    assert.ok(!(await readdir(dir)).some((p) => p.endsWith('.tmp')));
+    assert.ok(!(await readdir(claudeConfigDir)).some((p) => p.endsWith('.tmp')));
   });
 });

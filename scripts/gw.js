@@ -18,9 +18,10 @@ import {
 } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
+import { homedir } from 'node:os';
 import { env, loadConfig } from '../src/config.js';
 import { createConnection } from 'node:net';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -766,7 +767,7 @@ function cmdTest() {
 // Claude Code 的 env 只在启动时读一次，所以"换配置"必须配合重启 Claude Code。
 // 直接手改/手改名很容易留下一个半残的 settings.json，导致 Claude Code 起不来。
 // 这里做成事务：先备份 → 校验两份 JSON → 原子替换 → 报告结果。
-const CLAUDE_DIR = dirname(ROOT); // claude-gateway 的上一层就是 ~/.claude
+const CLAUDE_DIR = resolve(readEnvValue('CLAUDE_CONFIG_DIR', join(homedir(), '.claude')));
 const SETTINGS_ACTIVE = join(CLAUDE_DIR, 'settings.json');
 const SETTINGS_GATEWAY = join(CLAUDE_DIR, 'settings.json_gateway');
 

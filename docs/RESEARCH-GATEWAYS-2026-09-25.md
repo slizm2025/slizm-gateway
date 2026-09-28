@@ -4,7 +4,7 @@
 
 ## 结论先行
 
-当前 `claude-gateway` 已经把最容易出事故的传输层问题处理得比较完整：Anthropic Messages 透传、OpenAI/Gemini 格式转换、流式 SSE、请求取消、连接阶段安全重试、并发闸门、密钥脱敏、token/cost 账本和本地诊断都有对应实现与离线回归。
+当前 `slizm-gateway` 已经把最容易出事故的传输层问题处理得比较完整：Anthropic Messages 透传、OpenAI/Gemini 格式转换、流式 SSE、请求取消、连接阶段安全重试、并发闸门、密钥脱敏、token/cost 账本和本地诊断都有对应实现与离线回归。
 
 最值得借鉴的不是再增加 provider 数量，而是把“固定路由”逐步升级为“可解释的可靠路由”:
 

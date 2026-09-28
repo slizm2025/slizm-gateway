@@ -6,6 +6,57 @@ Claude Code 多 provider 网关
 
 改动历史与排障记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md)。[2026-09-25 日志展示会话记录](docs/SESSION-2026-09-25-LOG-DISPLAY.md) 保存本阶段的需求、修改步骤、调试偏差和验证流程。其他审查证据见 [docs/AUDIT-HARDENING.md](docs/AUDIT-HARDENING.md)、[docs/AUDIT.md](docs/AUDIT.md)，安全检查范围见 [docs/walkthrough.md](docs/walkthrough.md)。
 
+## 下载与首次配置
+
+要求：Git、Node.js 20 或更高版本。项目可以放在任意目录，不要求位于 `~/.claude` 下。
+
+```bash
+git clone https://github.com/slizm2025/slizm-gateway.git
+cd slizm-gateway
+```
+
+创建不会提交到 Git 的本地配置文件：
+
+```powershell
+# Windows PowerShell
+Copy-Item .env.example .env
+Copy-Item providers.example.json providers.json
+```
+
+```bash
+# macOS / Linux / Git Bash
+cp .env.example .env
+cp providers.example.json providers.json
+```
+
+1. 编辑 `.env`，只填写实际使用的上游密钥；`providers.json` 通过 `env:变量名` 引用它们。
+2. 编辑 `providers.json`：配置每个 provider 的 `baseUrl`、`apiType`、模型映射和 `routes`。
+3. 把 `clientToken` 改成仅供本机使用的随机值。Claude Code 配置中的 `ANTHROPIC_AUTH_TOKEN` 必须与它完全相同。
+4. 先运行 `npm test`。该命令仅使用本地模拟上游，不会产生模型费用。
+5. 执行 `node scripts/gw.js start`，再用 `node scripts/gw.js status` 检查状态；执行 `node scripts/gw.js web` 打开管理页。
+
+让 Claude Code 使用网关时，在其 `settings.json` 的 `env` 中至少配置：
+
+```json
+{
+  "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
+  "ANTHROPIC_AUTH_TOKEN": "与 providers.json 的 clientToken 相同"
+}
+```
+
+Claude Code 默认配置目录是 Windows 的 `%USERPROFILE%\.claude` 或 macOS/Linux 的 `~/.claude`。如果使用其他目录，启动 Claude Code 和执行 `gw.js mode` 时都设置同一个 `CLAUDE_CONFIG_DIR`：
+
+```powershell
+$env:CLAUDE_CONFIG_DIR = "$HOME\.slizm-gateway-test"
+claude
+```
+
+```bash
+CLAUDE_CONFIG_DIR="$HOME/.slizm-gateway-test" claude
+```
+
+修改 provider、密钥、路由或端口后执行 `node scripts/gw.js restart`。只有模型价格与 provider 价格倍率支持运行时热更新。`node scripts/selftest.js` 会调用真实上游并可能产生费用，应在完成配置后按需运行。
+
 ## 离线回归与排障
 
 ```bash
@@ -173,8 +224,8 @@ node scripts/selftest.js
 
 ```bash
 # 建一个隔离的配置目录
-mkdir -p ~/.claude-gateway-test
-cp ~/.claude/settings.json ~/.claude-gateway-test/settings.json
+mkdir -p ~/.slizm-gateway-test
+cp ~/.claude/settings.json ~/.slizm-gateway-test/settings.json
 ```
 
 然后编辑该文件，只改 `env` 段：
@@ -194,7 +245,7 @@ cp ~/.claude/settings.json ~/.claude-gateway-test/settings.json
 启动：
 
 ```bash
-CLAUDE_CONFIG_DIR=~/.claude-gateway-test claude
+CLAUDE_CONFIG_DIR=~/.slizm-gateway-test claude
 ```
 
 验证无误后，再把这几行搬进主配置。

@@ -68,11 +68,11 @@
 
 ## 备份与恢复
 
-目录不是Git仓库。修改前源码快照位于本机临时目录 `C:\Users\33231\AppData\Local\Temp\claude-gateway-audit-20260925-012309`，不含真实.env/provider配置。快照在新增第一条CONNECT回归之后、生产源码修改之前建立。恢复时仅覆盖本次改动的源码、脚本和文档，保留密钥、路由与日志；确认没有在途请求后重启。
+目录当时不是 Git 仓库。修改前源码快照位于本机临时目录 `C:\Users\33231\AppData\Local\Temp\claude-gateway-audit-20260925-012309`（旧项目名历史路径），不含真实 `.env` / provider 配置。快照在新增第一条 CONNECT 回归之后、生产源码修改之前建立。恢复时仅覆盖本次改动的源码、脚本和文档，保留密钥、路由与日志；确认没有在途请求后重启。
 
 ## 运行实例
 
-已完成部署：先核对旧进程PID 5936及4100端口归属，确认所有provider闸门active=0、waiting=0后停止旧实例。新实例PID 43820于2026-09-24T19:32:01.591Z启动，继续监听127.0.0.1:4100。健康核验：status=ok、service=claude-gateway、transport=node-http-connect-v2、activeRequests=0，原有15条路由保留；未授权模型列表返回401，非法JSON请求返回400。未发送真实付费推理请求，因此该验证不等同于远程上游推理链路的长期稳定性认证。
+已完成部署：先核对旧进程 PID 5936 及 4100 端口归属，确认所有 provider 闸门 active=0、waiting=0 后停止旧实例。新实例 PID 43820 于 2026-09-24T19:32:01.591Z 启动，继续监听 127.0.0.1:4100。健康核验记录中的 `service=claude-gateway` 是当时的旧服务标识，当前标识为 `service=slizm-gateway`；transport=node-http-connect-v2、activeRequests=0，原有 15 条路由保留；未授权模型列表返回 401，非法 JSON 请求返回 400。未发送真实付费推理请求，因此该验证不等同于远程上游推理链路的长期稳定性认证。
 
 ## 已查阅的开源参考
 

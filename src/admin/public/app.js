@@ -1,5 +1,5 @@
 /**
- * Claude Gateway Admin Console Frontend
+ * Slizm Gateway Admin Console Frontend
  * Pure JavaScript, no external runtime dependencies, no inline event handlers.
  */
 (function () {

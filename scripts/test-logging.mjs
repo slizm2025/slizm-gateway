@@ -205,7 +205,7 @@ test('server.js：每个请求的日志各占一行，内容准确', async (t) =
 
 test('gw.js logs：本地时间、只看异常、持续跟随；start 前轮转大日志', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'gw-logs-cli-'));
-  const gateway = join(dir, 'claude-gateway');
+  const gateway = join(dir, 'slizm-gateway');
   await mkdir(join(gateway, 'scripts'), { recursive: true });
   await mkdir(join(gateway, 'logs'), { recursive: true });
   await cp(join(root, 'src'), join(gateway, 'src'), { recursive: true });
