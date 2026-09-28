@@ -22,9 +22,28 @@ node scripts/gw.js status   # 查看 PID、transport 和源码更新提示
 - `/health` 含运行实例PID、启动时间和传输版本，但只代表本地进程可用。源码修改后应在请求完成后重启；管理器拒绝停止无法核验身份的旧版进程，旧实例需核对命令行后手动迁移。
 - 流式错误不再产生成功 `message_stop`；为正确拼接分片工具名称，OpenAI工具块在完整收到后输出，普通文本保持增量输出。
 - 生产TLS校验始终开启，`allowInsecureTls:true` 现在报配置错误而非被静默忽略。可信自签CA应通过 `NODE_EXTRA_CA_CERTS` 配置。
-- 环境变量优先于 `.env`；配置、密钥及路由变更仍需要重启。
+- 环境变量优先于 `.env`；密钥、路由等运行配置变更仍需要重启，模型价格与 provider 倍率支持热更新。
 
-## 查看日志
+## 本地管理 Web
+
+```bash
+node scripts/gw.js start          # 启动网关，同时启动独立管理 Web
+node scripts/gw.js web            # 打开浏览器并登录管理页面
+node scripts/gw.js web --no-open  # 仅启动 Web，不打开浏览器
+node scripts/gw.js web --stop     # 仅停止 Web，不影响网关
+```
+
+双击 `start.cmd` 会在网关启动成功后打开管理页面。默认地址为 `http://127.0.0.1:48731/`；默认端口被占用时会自动选一个空闲本地端口，启动命令会显示实际地址。管理服务固定只监听本机，可用 `GATEWAY_WEB_PORT` 指定端口（显式指定端口被占用时报错，不自动改用其他端口）。设置 `GATEWAY_WEB_ENABLED=0` 可禁止 `start` 自动启动 Web，仍可单独执行 `web` 命令。直接运行 `src/server.js` 或使用已有 pm2 启动方式时，需另行执行 `web` 命令。
+
+- **运行概览**：网关状态、在途请求、历史趋势、请求明细，以及各 provider 和模型的 tokens / USD 消耗。可按时间和站点筛选，网关停止时仍可查看历史账本。费用使用统一模型 API 单价，不是站点账户余额；未上报用量和缺失价格单独标记。
+- **请求日志**：stdout / stderr 切换、关键词和异常筛选、暂停刷新，以及下载当前可见日志。读取文件末尾的有界窗口，不加载无限增长的整份日志。
+- **基础设置**：Provider 新增、编辑、删除、API Key 更新、模型映射、路由、默认站点、并发数、重试次数、超时和请求日志开关。已有 API Key 不回显，留空保留原值；模型价格（原价）与各站点的逐项价格倍率也可在此编辑；未展示的代理和请求头保持不变。
+- **保存与生效**：保存前校验完整配置并备份，使用版本校验防止覆盖其他窗口或手动编辑。模型价格与 provider 倍率保存后主动通知网关热更新，并显示是否已确认生效；其他修改仍需重启。保存不自动重启，有在途请求时拒绝重启。JSON 顶层 `logRequests`（布尔值）存在时优先于 `GATEWAY_LOG_REQUESTS`，未设置时保留原有环境变量行为。
+- **本机认证**：`web` 命令使用 URL fragment 完成本地登录，页面随即移除凭据并使用 HttpOnly 会话 cookie。管理 API 校验 Host、Origin 和会话，不向浏览器返回上游密钥。登录失效时重新执行 `node scripts/gw.js web`。不要分享 `logs/web-session.json`，它包含管理页面的本地登录凭据。
+
+管理 Web 与网关进程独立，重启或停止网关后页面仍然可用。Web 自身的输出在 `logs/web.out.log` / `logs/web.err.log`；更新管理 Web 源码后执行 `web --stop` 再执行 `web`，不会中断模型请求。
+
+## 命令行日志
 
 ```bash
 node scripts/gw.js logs                         # 默认紧凑视图，最近 40 条匹配行
@@ -94,12 +113,37 @@ cp providers.example.json providers.json
 ```json
 {
   "pricing": {
-    "claude-opus-5-5": { "input": 4, "cacheRead": 0.2, "cacheWrite": 5, "output": 20 }
+    "claude-opus-5-5": { "input": 4, "cacheRead": 0.4, "cacheWrite": 5, "output": 20 }
   }
 }
 ```
 
-价格按最终上游模型 ID 匹配，修改 `providers.json` 后需要重启网关。
+价格按最终上游模型 ID 匹配，也可以在管理页「基础设置 → 模型价格」中编辑；修改后支持热更新，无需重启网关。
+
+顶层 `pricing` 是各模型的原价。不同站点可以在 provider 上配置 `priceMultipliers`，对输入、输出、缓存读、缓存写分别设置倍率；模型 ID 精确匹配优先，`*` 是该站点其余模型的默认倍率，未设置的项按 1 计算：
+
+管理页的站点倍率表同时提供「统一倍率」输入框，填写后会同步修改输入、输出、缓存读、缓存写四项；需要差异化计费时仍可逐项调整。
+
+```json
+{
+  "name": "any",
+  "priceMultipliers": {
+    "*": { "input": 1.2, "output": 1.2 },
+    "claude-opus-5-5": { "input": 1, "output": 1, "cacheRead": 0.5, "cacheWrite": 1 }
+  }
+}
+```
+
+账本每条记录同时保存 `baseCostUsd`（原价）、`priceMultiplier`（本次生效的倍率，原价时省略）和 `costUsd`（倍率后）。管理页的费用列默认显示原价，展开后可查看倍率后的金额和计费明细；趋势金额图也以原价绘制，悬浮时同时显示倍率后金额。这些金额按配置的单价和倍率计算，不代表站点账户余额或实际扣款。
+
+### 计价热更新
+
+- 管理页保存后，网关校验磁盘上的目标版本，原子替换全局单价和各 provider 倍率。确认成功后的新请求立即使用新计价；无须等待其他用户完成请求，也不会清空用量统计或重置并发队列。
+- 每次请求在进入 `beginUsage()` 时锁定单价、倍率和计价版本，包括已进入并发排队的请求。流式响应、重试与请求结束记账均沿用这份快照，不会中途改价。账本新增 `pricingRevision`、`pricingEffectiveAt`，已完成账目不追溯重算。
+- 直接编辑 `providers.json` 也支持：目录监听约 200ms 防抖，另有 1 秒轮询兜底（受事件循环负载影响）。解析或计价校验失败时保留上一份有效计价，文件修复后自动恢复。手动编辑应使用临时文件加重命名，避免加载尚未完成的编辑内容。
+- 仅 `pricing` 和 `providers[].priceMultipliers` 热更新；地址、密钥、模型映射、路由、超时及并发限制保持启动配置。混合修改时计价可先应用，其余仍提示待重启；provider 新增或更名也必须重启。
+- `GET /v1/pricing-status`（普通网关鉴权）可核对运行版本、生效时间、错误和待重启状态。`POST /v1/reload-pricing` 仅允许本机专用管理凭据，普通客户端 token 无权触发；管理端自动通过配置文件同目录下 `logs/pricing-runtime-*.json` 中的实例凭据调用，凭据不能提交或分享。
+- 保存成功但网关离线、版本冲突或不支持热更新时，界面明确提示“已保存但未确认生效”，不会自动重启或回滚配置。首次部署此功能仍需在空闲时重启一次网关，并重新启动管理 Web 加载新代码；旧进程不会因为源码修改自动获得新能力。
 
 ### 3. 启动
 
@@ -234,9 +278,12 @@ node scripts/gw.js tokens            # 今天（本地时间 00:00 起）
 node scripts/gw.js tokens 12h        # 最近 12 小时；7d = 最近 7 天；all = 账本全部
 node scripts/gw.js tokens 7d --by route -n 20   # 按路由分组，显示最近 20 条
 node scripts/gw.js tokens --table    # 图下面再附一张完整的数字表
+node scripts/gw.js tokens all --by provider   # 按站点查看全部历史消耗
+node scripts/gw.js tokens 7d --provider relay --table   # 只查看 relay 站点
 ```
 
 报表是终端图形：
+- **站点总览**：默认列出各 provider 的请求数、tokens 合计与美元费用；配置中的无用量站点和账本中的历史站点都会展示。站点按 provider 名称区分，不自动合并同域名配置。
 - **总量构成**：一根堆叠横条（缓存读 / 缓存写 / 输入 / 输出），下面的图例带数值和占比。
 - **趋势**：柱状图，展示 token 合计随时间的变化。48 小时以内按小时，更长按天；桶太多时自动合并。
 - **分组对比**：每个模型（或路由、上游）一根按构成堆叠的横条，按用量排序。
@@ -247,23 +294,39 @@ node scripts/gw.js tokens --table    # 图下面再附一张完整的数字表
 - 每个请求结束时，网关向 `logs/usage-YYYY-MM.jsonl`（按本地月份分文件）追加一行：路由、上游、模型、状态、耗时、输入 / 缓存读 / 缓存写 / 输出四项 token，以及 `costUsd`。网关重启不丢，没在运行时也能查。
 - token 一律按 Anthropic 语义统计：「输入」不含缓存。OpenAI 类上游的 `prompt_tokens` 含缓存命中，网关会拆成未缓存输入 + `cache_read_input_tokens`（两者之和不变，Claude Code 的上下文占用计算不受影响）。
 - 只统计上游真实上报的数；请求中途断开时，已收到的 usage 照样计入（上游同样计费）。没有上报的请求标为「未上报」，只显示估算输入。
-- 汇总和 `--table` 会显示美元费用；模型未配置价格时显示「未配置」，不会伪造为 `$0`。旧账本没有 `costUsd` 时，报表会按当前 `pricing` 兼容计算。
+- 汇总和 `--table` 会显示美元费用；模型未配置价格时显示「未配置」，不会伪造为 `$0`。已保存的 `costUsd`（包括无法计价的 `null`）不随配置变化；旧账本没有 `costUsd` 时，报表按当前全局 `pricing` 兼容计算。
+- `--provider` 按配置中的 provider 名称精确筛选，同时作用于总览、趋势、模型/路由分组、最近记录与在途请求；时间范围仍由 `today`、`12h`、`7d`、`all` 控制。
 - 状态 499 表示客户端取消（在 Claude Code 里按 Esc），单独计数，不算失败。
 - 报表末尾列出网关当前在途的请求；流式请求收到 `message_start` 后会显示本次上下文大小。
 - 原始数据：`GET /v1/usage`（需客户端 token）返回本次启动以来的内存汇总、在途请求和最近 200 条。
 - `GATEWAY_USAGE_DIR` 可改账本目录，设为 `off` 关闭。设置了自定义 `GATEWAY_CONFIG`（离线测试都会设）且没设 `GATEWAY_USAGE_DIR` 时不记账，避免测试数据混进真实账本。
 
-## 按目标模型选择客户端指纹
+## 按客户端选择客户端指纹
 
-公共策略在 `src/providers/client-headers.js`。默认 `clientProfile: "auto"`，根据**最终上游模型名**判断，不根据路由别名或 `apiType: "openai"` 判断。后者也包含 DeepSeek、Gemini 等兼容 API。
+公共策略在 `src/providers/client-headers.js`。默认 `clientProfile: "auto"` 会先分析入站请求，再决定是否需要 profile 改写：
 
-- `gpt-*`、`chatgpt-*`、`o数字` / `o数字-*`、`codex-*` 及相应的命名空间前缀（如 `openai/gpt-*`）使用 Codex 风格头。
-- 其他模型保留真实入站 Claude Code 头，包括 `user-agent`、`accept`、`accept-encoding`、`x-app`、`x-stainless-*`、`x-claude-*`、`anthropic-*`。Anthropic 透传路径还保留其他端到端头。
-- 所有路径删除客户端凭据、固定逐跳头、`Connection` 指定的逐跳头和需重新计算的长度/编码头，再设置上游鉴权。`extraHeaders` 最后按大小写不敏感的方式覆盖。
-- 覆盖优先级为路由 `clientProfile` > provider `clientProfile` > 自动判断。支持 `auto` / `claude` / `codex`。不能从自定义模型名判断系列时可显式配置；路由设 `auto` 可覆盖 provider 的固定指纹。
+- `claude-cli/*`、`claude-code/*`、`x-claude-code-session-id`，或带有 Anthropic/Stainless 头的 `x-app: cli` 识别为 Claude Code。
+- `Codex ...`、`originator` 或 `x-codex-*` 识别为 Codex。
+- `deepseek-harness ...`、`x-deepseek-harness-*`、`x-harness-*` 或 `x-client-name: deepseek-harness` 识别为 DeepSeek Harness；其它带 `deepseek` 标识的请求识别为 DeepSeek。
+- 默认情况下保留实际入站客户端指纹，包括自定义 `x-*` 头；仅删除客户端凭据、固定逐跳头、`Connection` 指定的逐跳头和需重新计算的长度/编码头，再设置上游鉴权。
+- 唯一的自动改写特例是：**识别为 Claude Code 且最终上游模型属于 GPT/OpenAI 系列时**，生成既有 Codex 风格头，以保持 GPT 的缓存行为。Codex、DeepSeek Harness 和未知客户端不会因为目标模型名是 `gpt-*` 就被伪装成 Codex。
+- 覆盖优先级为路由 `clientProfile` > provider `clientProfile` > 客户端识别。支持 `auto` / `claude` / `codex`；显式 `codex` 对 Claude Code 和未知客户端仍会生成 Codex profile，但已识别的 Codex/DeepSeek Harness 会优先保留自身入站指纹。
 - Codex 请求不会混入 Claude 身份头；同一逻辑请求的重试复用 session/turn/request ID，独立请求使用新上下文，installation ID 在本进程内稳定。可用 `CODEX_INSTALLATION_ID` 固定跨重启标识。
 - `codexVersion`、`codexOriginator`、`codexBetaFeatures` 继续可配置；沿用项目既有抓包模板，不宣称与未来或所有版本官方客户端完全一致。这里只调整 HTTP 头，不把 Chat Completions 变成 Responses API，不借用真实客户端凭据，也不保证通过上游客户端身份限制。
-- Claude profile 只透传真实入站值，不为普通脚本凭空补造 Claude Code UA。
+- Claude profile 只透传真实入站值，不为普通脚本凭空补造 Claude Code UA；OpenAI 兼容 adapter 也会透传被识别客户端的原始自定义头。
+
+### 原生 Codex 接入
+
+网关提供 `POST /v1/responses` 入口，并按客户端与 provider 分流：
+
+- **Codex + `apiType: "openai"`**：直接请求该 provider 的 `baseUrl + /responses`，不经过 Anthropic 或 Chat Completions 转换。`baseUrl` 应是上游 API 前缀，例如 `https://example.com/v1`。上游必须支持 Responses API；不支持时原样返回上游错误，不自动降级。
+- 非 Gemini 直通请求体只按路由替换顶层 `model`。`input`、`instructions`、tools、reasoning、未知字段和 `previous_response_id` 均保留，后者由上游处理。模型无需映射时直接使用原始 JSON；映射时也只替换 model 字符串。
+- provider 和 API key 由路由选择；客户端网关凭据不会发给上游。保留原始 Codex 身份头，不生成新的 Codex 指纹。原生 Responses 的 `extraHeaders` 只补充非身份、非鉴权、非逐跳的辅助头，不能覆盖客户端已有头；协议转换路径保持原来的覆盖行为。逐跳头、Host、长度及压缩编码属于传输层处理，不承诺 HTTP 报文字节完全相同。
+- Gemini 是明确例外：为兼容上游身份词检查，保留对 Codex instructions、Claude system 及 system/developer 消息身份句的适配，不修改普通用户消息。Claude Code + Anthropic 协议的非 Gemini 请求也保留原始 JSON，仅在需要时替换顶层 model。
+- 可用性优先：保留并发控制、有限退避重试及 token 计数兼容回退。最终 Anthropic 错误正文完整转发，日志仅采样有上限的副本；不可安全重试的 5xx 仍附带原有的 `x-should-retry: false` 保护。Gemini 计数请求沿用身份句适配。这些保证不代表上游无法从 TLS、连接或时序识别代理。
+- 上游 JSON、错误响应及 SSE 的响应体原样转发，不重新生成 ID 或事件，不把响应 model 改回别名。压缩响应按现有传输层解压后转发；usage 仅旁路读取用于记账。
+- 其它客户端或 Anthropic/Gemini provider 继续走兼容转换：支持文本、developer 指令和基础 function tools，但不保证无损；兼容路径的 `previous_response_id` 仅保存在当前网关进程中。
+- Claude Code 调用 GPT 时沿用既有 Codex 指纹特殊逻辑，此次直通功能不改变它。
 
 这些规则同时用于生成、Anthropic token 计数及各适配器的模型发现；模型发现没有目标模型时使用 provider 的显式 profile 或默认 Claude profile。公开 `/v1/models` 仍只列本地路由。
 

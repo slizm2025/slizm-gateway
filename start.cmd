@@ -6,5 +6,7 @@ if errorlevel 1 (
   echo.
   echo Startup failed. Recent log:
   node scripts\gw.js logs 25
+) else (
+  node scripts\gw.js web
 )
 pause

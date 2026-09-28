@@ -62,20 +62,24 @@ test('Claude fingerprint obeys Connection exclusions on OpenAI routes', () => {
   assert.equal(h['user-agent'], undefined);
   assert.equal(h['x-app'], undefined);
 });
-test('configured header overrides are case-insensitive and not comma-joined', () => {
-  for (const build of [buildOpenAIHeaders, buildHeaders]) {
-    for (const clientProfile of ['codex', 'claude']) {
-      const h = build({ ...provider, extraHeaders: { Authorization: 'Bearer replacement', 'User-Agent': 'configured' } }, incoming, { clientProfile });
-      assert.equal(h.authorization, 'Bearer replacement');
-      assert.equal(h['user-agent'], 'configured');
-      assert.equal(h.Authorization, undefined);
-    }
+test('configured header overrides remain limited to OpenAI adapters', () => {
+  for (const clientProfile of ['codex', 'claude']) {
+    const h = buildOpenAIHeaders({ ...provider, extraHeaders: { Authorization: 'Bearer replacement', 'User-Agent': 'configured' } }, incoming, { clientProfile });
+    assert.equal(h.authorization, 'Bearer replacement');
+    assert.equal(h['user-agent'], 'configured');
+    assert.equal(h.Authorization, undefined);
   }
+  const anthropicHeaders = buildHeaders({ ...provider, apiType: 'anthropic', extraHeaders: { 'User-Agent': 'configured' } }, incoming);
+  assert.equal(anthropicHeaders['user-agent'], incoming['user-agent']);
 });
-test('Anthropic compatibility transport also selects profile by final model', () => {
+test('Anthropic compatibility transport preserves the incoming client profile', () => {
   const h = buildHeaders(provider, incoming, { targetModel: 'gpt-6-sol' });
-  assert.ok(h.originator);
-  assert.equal(h['x-app'], undefined);
+  assert.equal(h['user-agent'], incoming['user-agent']);
+  assert.equal(h['x-app'], incoming['x-app']);
+  assert.equal(h['x-stainless-timeout'], incoming['x-stainless-timeout']);
+  assert.equal(h['x-claude-code-session-id'], incoming['x-claude-code-session-id']);
+  assert.equal(h.originator, undefined);
+  assert.equal(h.authorization, 'Bearer upstream-secret');
 });
 test('Anthropic model discovery uses one upstream credential', async (t) => {
   let headers;
@@ -231,8 +235,15 @@ test('gateway profile routing, retry identity and optional upstream authenticati
   await send('deep'); assert.equal(seen.at(-1).headers['x-stainless-timeout'], '600');
   await send('forced'); assert.equal(seen.at(-1).headers['user-agent'], incoming['user-agent']);
   await send('anonymous'); assert.equal(seen.at(-1).headers.authorization, undefined);
-  await send('anth'); assert.ok(seen.at(-1).headers.originator);
-  await send('anth', '/v1/messages/count_tokens'); assert.ok(seen.at(-1).headers.originator);
+  await send('anth');
+  assert.equal(seen.at(-1).headers['user-agent'], incoming['user-agent']);
+  assert.equal(seen.at(-1).headers['x-app'], incoming['x-app']);
+  assert.equal(seen.at(-1).headers['x-stainless-timeout'], incoming['x-stainless-timeout']);
+  assert.equal(seen.at(-1).headers.originator, undefined);
+  assert.equal(seen.at(-1).headers.authorization, 'Bearer key');
+  await send('anth', '/v1/messages/count_tokens');
+  assert.equal(seen.at(-1).headers['user-agent'], incoming['user-agent']);
+  assert.equal(seen.at(-1).headers.originator, undefined);
   await send('gemini'); assert.equal(seen.at(-1).headers.originator, undefined);
   assert.equal(seen.at(-1).path, '/v1beta/openai/chat/completions');
   const cr = await fetch(gateway + '/v1/messages', { method: 'POST', headers: { authorization: 'Bearer client-fixture' }, body: JSON.stringify({ model: 'cr', stream: true, messages: [{ role: 'user', content: 'hello' }] }) });

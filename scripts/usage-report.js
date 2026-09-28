@@ -46,23 +46,23 @@ const GROUPS = {
   provider: { title: '上游', key: (i) => i.provider },
 };
 
-export const USAGE = 'node scripts/gw.js tokens [today | 12h | 7d | all] [--by model|route|provider] [-n 最近条数] [--table]';
+export const USAGE = 'node scripts/gw.js tokens [today | 12h | 7d | all] [--provider 名称] [--by model|route|provider] [-n 最近条数] [--table]';
 
 // ── 格式化 ──────────────────────────────────────────────────────────────
 
-/** 3 位有效数字的紧凑写法：950 / 1.23k / 45.6k / 789k / 4.56M */
+/** 3 位有效数字的紧凑写法：950 / 1.23K / 45.6K / 789K / 4.56M */
 export function fmtTokens(n) {
   n = Number(n) || 0;
   if (n < 1000) return String(Math.round(n));
-  const [unit, size] = n >= 999_500_000 ? ['B', 1e9] : n >= 999_500 ? ['M', 1e6] : ['k', 1e3];
+  const [unit, size] = n >= 999_500_000 ? ["B", 1e9] : n >= 999_500 ? ["M", 1e6] : ["K", 1e3];
   const x = n / size;
   return `${x >= 99.95 ? x.toFixed(0) : x >= 9.995 ? x.toFixed(1) : x.toFixed(2)}${unit}`;
 }
 
-/** 坐标轴刻度去掉多余的 0：1M / 2.5M / 500k */
+/** 坐标轴刻度去掉多余的 0：1M / 2.5M / 500K */
 function fmtTick(n) {
   if (n < 1000) return String(n);
-  const [unit, size] = n >= 1e9 ? ['B', 1e9] : n >= 1e6 ? ['M', 1e6] : ['k', 1e3];
+  const [unit, size] = n >= 1e9 ? ['B', 1e9] : n >= 1e6 ? ['M', 1e6] : ['K', 1e3];
   return `${Number((n / size).toFixed(2))}${unit}`;
 }
 
@@ -77,11 +77,8 @@ export function fmtDuration(ms) {
 
 export function fmtUsd(value) {
   const n = Number(value);
-  if (!Number.isFinite(n)) return '-';
-  if (n === 0) return '$0.00';
-  if (Math.abs(n) < 0.01) return `$${n.toFixed(6)}`;
-  if (Math.abs(n) < 1) return `$${n.toFixed(4)}`;
-  return `$${n.toFixed(2)}`;
+  if (!Number.isFinite(n)) return "-";
+  return "$" + n.toFixed(6);
 }
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -324,7 +321,7 @@ function emptyRow() {
   return {
     requests: 0, errors: 0, cancelled: 0, unreported: 0,
     input: 0, cacheRead: 0, cacheWrite: 0, output: 0, durationMs: 0,
-    costUsd: 0, pricedRequests: 0, unpricedRequests: 0,
+    costUsd: 0, baseCostUsd: 0, pricedRequests: 0, unpricedRequests: 0,
   };
 }
 
@@ -348,6 +345,8 @@ function addItem(row, item, pricing) {
     if (item.usageSource === 'reported') row.unpricedRequests++;
   } else {
     row.costUsd += cost;
+    // 旧账本没有 baseCostUsd，视为倍率 1
+    row.baseCostUsd += item.baseCostUsd == null ? cost : Number(item.baseCostUsd);
     row.pricedRequests++;
   }
 }
@@ -368,13 +367,22 @@ export function summarize(items, by = 'model', pricing) {
 
 // ── 输出 ────────────────────────────────────────────────────────────────
 
-function parseArgs(args) {
+export function parseArgs(args) {
   const opts = { period: 'today', recent: 10, by: 'model', table: false };
+  let hasPeriod = false;
   for (let i = 0; i < args.length; i++) {
+    if (['-n', '--recent', '--by', '--provider'].includes(args[i]) &&
+        (!args[i + 1]?.trim() || args[i + 1].startsWith('-'))) return { error: `${args[i]} 需要一个参数` };
     if (args[i] === '-n' || args[i] === '--recent') opts.recent = Number(args[++i]);
     else if (args[i] === '--by') opts.by = String(args[++i]);
+    else if (args[i] === '--provider') opts.provider = args[++i];
     else if (args[i] === '--table') opts.table = true;
-    else opts.period = args[i];
+    else if (args[i].startsWith('-')) return { error: `无法识别的选项: ${args[i]}` };
+    else {
+      if (hasPeriod) return { error: `时间范围只能指定一次: ${args[i]}` };
+      opts.period = args[i];
+      hasPeriod = true;
+    }
   }
   const period = parsePeriod(opts.period);
   if (!period) return { error: `无法识别的时间范围: ${opts.period}` };
@@ -392,6 +400,27 @@ function costCell(row) {
   if (!row.pricedRequests && !row.unpricedRequests) return '-';
   if (!row.pricedRequests) return `未配置(${row.unpricedRequests})`;
   return row.unpricedRequests ? `${fmtUsd(row.costUsd)} +未配置${row.unpricedRequests}` : fmtUsd(row.costUsd);
+}
+
+function printProviders(items, pricing, providers, opts) {
+  const { rows } = summarize(items, 'provider', pricing);
+  const known = new Set(rows.map(([name]) => name));
+  for (const name of opts.provider ? [opts.provider] : providers?.keys() ?? []) {
+    if (!known.has(name)) rows.push([name, emptyRow()]);
+  }
+  console.log(`  ${paint(C.cyan, '站点消耗')} · ${opts.label}`);
+  const body = rows.map(([name, row]) => [
+    name, String(row.requests), fmtTokens(rowTotal(row)),
+    row.requests ? costCell(row) : fmtUsd(0),
+    row.unreported ? String(row.unreported) : '-',
+  ]);
+  if (!body.length) console.log(paint(C.dim, '  没有站点记录。'));
+  else for (const line of table([
+    { title: 'Provider' }, { title: '请求', right: true }, { title: 'Tokens', right: true },
+    { title: '费用 (USD)', right: true }, { title: '未上报', right: true },
+  ], body)) console.log(line);
+  console.log(paint(C.dim, '  费用按统一模型 API 单价计算；未上报的用量不计入，非账户余额。'));
+  console.log(RULE);
 }
 
 function statusText(status) {
@@ -519,17 +548,17 @@ function printRecent(items, count, pricing) {
       context = paint(C.dim, item.estimatedInputTokens ? `未上报 ~${fmtTokens(item.estimatedInputTokens)}` : '未上报');
     }
     const cost = itemCost(item, pricing);
-    const row = [fmtClock(time, time.toDateString() !== today), item.route, statusText(item.status), fmtDuration(item.durationMs), context, output, cost === null ? (item.usageSource === 'reported' ? '未配置' : '-') : fmtUsd(cost)];
+    const row = [fmtClock(time, time.toDateString() !== today), item.provider, item.route, statusText(item.status), fmtDuration(item.durationMs), context, output, cost === null ? (item.usageSource === 'reported' ? '未配置' : '-') : fmtUsd(cost)];
     if (hasError) row.push(item.error ? paint(C.red, item.error.slice(0, 60)) : '');
     return row;
   });
   console.log(`  最近 ${recent.length} 条  ${paint(C.dim, '上下文 = 输入 + 缓存读 + 缓存写，条长按这几条里最大的缩放')}`);
-  const columns = [{ title: '时间' }, { title: '路由' }, { title: '状态' }, { title: '耗时', right: true }, { title: '上下文' }, { title: '输出', right: true }, { title: '费用', right: true }];
+  const columns = [{ title: '时间' }, { title: 'Provider' }, { title: '路由' }, { title: '状态' }, { title: '耗时', right: true }, { title: '上下文' }, { title: '输出', right: true }, { title: '费用', right: true }];
   if (hasError) columns.push({ title: '错误' });
   for (const line of table(columns, rows)) console.log(line);
 }
 
-function printLive(live) {
+function printLive(live, provider) {
   console.log(RULE);
   if (!live) {
     console.log(paint(C.dim, '  网关未运行（以上是账本里的历史数据）。'));
@@ -542,18 +571,18 @@ function printLive(live) {
     console.log(`${head} · ${paint(C.yellow, hint)}`);
     return;
   }
-  const inflight = live.stats.inflight ?? [];
+  const inflight = (live.stats.inflight ?? []).filter((r) => !provider || r.provider === provider);
   console.log(`${head} · 在途 ${inflight.length}`);
   const rows = inflight
     .sort((a, b) => b.elapsedMs - a.elapsedMs)
     .map((r) => [
-      r.requestId, r.route, `已 ${fmtDuration(r.elapsedMs)}`,
+      r.requestId, r.provider, r.route, `已 ${fmtDuration(r.elapsedMs)}`,
       r.contextTokens !== undefined ? `上下文 ${fmtTokens(r.contextTokens)}` : paint(C.dim, `估算输入 ~${fmtTokens(r.estimatedInputTokens)}`),
     ]);
-  if (rows.length) for (const line of table([{ title: '请求' }, { title: '路由' }, { title: '耗时' }, { title: 'token' }], rows)) console.log(line);
+  if (rows.length) for (const line of table([{ title: '请求' }, { title: 'Provider' }, { title: '路由' }, { title: '耗时' }, { title: 'token' }], rows)) console.log(line);
 }
 
-export async function printUsageReport({ args = [], base, token, pricing }) {
+export async function printUsageReport({ args = [], base, token, pricing, providers }) {
   const opts = parseArgs(args);
   if (opts.error) {
     console.log(paint(C.red, opts.error));
@@ -562,12 +591,26 @@ export async function printUsageReport({ args = [], base, token, pricing }) {
     return;
   }
   const dir = usageLedgerDir();
-  const items = readLedger(dir, opts.since);
+  const history = readLedger(dir, opts.provider ? 0 : opts.since);
   const live = await fetchLive(base, token);
+  if (opts.provider) {
+    const known = new Set([
+      ...(providers?.keys() ?? []), ...history.map((item) => item.provider),
+      ...Object.keys(live?.stats?.providers ?? {}), ...(live?.stats?.inflight ?? []).map((item) => item.provider),
+    ]);
+    if (!known.has(opts.provider)) {
+      console.log(paint(C.red, `未知 provider: ${opts.provider}；可用站点: ${[...known].join(', ') || '无'}`));
+      process.exitCode = 1;
+      return;
+    }
+    opts.label += ` · provider: ${opts.provider}`;
+  }
+  const items = history.filter((item) => Date.parse(item.time) >= opts.since && (!opts.provider || item.provider === opts.provider));
   console.log(RULE);
+  printProviders(items, pricing, providers, opts);
   printSummary(opts, items, dir, pricing);
   printRecent(items, opts.recent, pricing);
-  printLive(live);
+  printLive(live, opts.provider);
   console.log(RULE);
   if (dir) console.log(paint(C.dim, `  账本: ${(relative(ROOT, dir) || '.').replaceAll('\\', '/')}/usage-YYYY-MM.jsonl`));
   console.log(paint(C.dim, `  ${USAGE}`));

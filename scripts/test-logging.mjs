@@ -68,6 +68,7 @@ test('server.js：每个请求的日志各占一行，内容准确', async (t) =
       sse('content_block_stop', { type: 'content_block_stop', index: 0 });
       sse('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 7 } });
       sse('message_stop', { type: 'message_stop' });
+      if (model === 'stalled-after-stop') return;
       res.end();
     });
   });
@@ -78,13 +79,14 @@ test('server.js：每个请求的日志各占一行，内容准确', async (t) =
   await writeFile(config, JSON.stringify({
     clientToken: 'logging-client',
     providers: [
-      { name: 'anth', apiType: 'anthropic', baseUrl: upBase, apiKey: 'sk-logging-fixture-key', maxAttempts: 1 },
+      { name: 'anth', apiType: 'anthropic', baseUrl: upBase, apiKey: 'sk-logging-fixture-key', maxAttempts: 1, requestTimeoutMs: 1000 },
       { name: 'oai', apiType: 'openai', baseUrl: upBase, apiKey: 'sk-logging-fixture-key', authStyle: 'bearer', maxAttempts: 1 },
     ],
     routes: {
       'ok-alias': { provider: 'anth', model: 'ok-sse' },
       'err-sse': 'anth',
       'cut-sse': 'anth',
+      'stalled-after-stop': 'anth',
       'cf-502': 'anth',
       'gemini-x': 'anth',
       'oai-broken': { provider: 'oai', model: 'gpt-x' },
@@ -125,15 +127,24 @@ test('server.js：每个请求的日志各占一行，内容准确', async (t) =
 
   const ok = await post('ok-alias', { headers: { 'x-request-id': 'client-supplied-id' } });
   assert.ok((await ok.text()).includes('message_stop'));
-  assert.match(ok.headers.get('x-request-id'), /^gw_[0-9a-f]{8}$/);
-  await (await post('err-sse')).text();
-  await (await post('cut-sse')).text();
-  const cf = await post('cf-502', { stream: false });
+  assert.equal(ok.headers.get('x-request-id'), null);
+  await (await post('err-sse', { headers: { 'user-agent': 'Claude-Code/1.0' } })).text();
+  await (await post('cut-sse', { headers: { 'user-agent': 'DeepSeek Harness/1.0' } })).text();
+  const stalled = await post('stalled-after-stop');
+  const stalledBody = await stalled.text();
+  assert.equal(stalled.status, 200);
+  assert.ok(stalledBody.includes('message_stop'), stalledBody);
+  const cf = await post('cf-502', { stream: false, headers: { 'user-agent': 'DeepSeek/1.0' } });
   const cfBody = await cf.text();
   assert.equal(cf.status, 502);
-  assert.ok(cfBody.includes('190515.xyz | 502: Bad gateway') && !cfBody.includes('DOCTYPE'), cfBody);
+  assert.ok(cfBody.includes('190515.xyz | 502: Bad gateway') && cfBody.includes('<!DOCTYPE html>'), cfBody);
   assert.equal((await post('gemini-x', { stream: false, system: "You are Claude Code, Anthropic's official CLI." })).status, 200);
-  assert.ok((await (await post('oai-broken')).text()).includes('event: error'));
+  assert.ok((await (await post('oai-broken', { headers: { 'user-agent': 'Codex/1.0' } })).text()).includes('event: error'));
+  for (const userAgent of ['Codex/1.0', 'Claude-Code/1.0', 'DeepSeek Harness/1.0', 'DeepSeek/1.0', 'ExampleClient/1.0']) {
+    const response = await post('gemini-x', { stream: false, headers: { 'user-agent': userAgent } });
+    assert.equal(response.status, 200, userAgent);
+    await response.text();
+  }
   const usage = await (await fetch(`${base}/v1/usage`, { headers: { authorization: 'Bearer logging-client' } })).json();
   await sleep(100);
 
@@ -144,32 +155,51 @@ test('server.js：每个请求的日志各占一行，内容准确', async (t) =
     assert.ok(!out.includes('DOCTYPE') && !out.includes('<head>'), out);
   });
   await t.test('启动时一个 provider 一行', () => {
-    assert.ok(find('网关已启动', `:${port}`, '6 条路由'), out);
+    assert.ok(find('网关已启动', `:${port}`, '7 条路由'), out);
     assert.ok(find('anth（anthropic）', 'ok-alias⇒ok-sse', 'err-sse'), out);
     assert.ok(find('oai（openai）', 'oai-broken⇒gpt-x'), out);
   });
   await t.test('请求 ID 由网关生成，不回显客户端带来的值', () => {
     assert.ok(!out.includes('client-supplied-id'), out);
-    assert.match(find('→ ok-alias ⇒ ok-sse @anth · 流式') ?? '', /\] \[gw_[0-9a-f]{8}\] → /);
+    const start = lines.find((line) => line.includes('→ messages ok-alias')) ?? '';
+    assert.match(start, /\] \[gw_[0-9a-f]{8}\] → /);
+    assert.ok(start.includes('→ messages') && start.includes('ok-alias ⇒ ok-sse ·?·') && start.includes('@anth · direct · 流式'), start);
   });
   await t.test('成功的流式请求：首字节、总耗时、字节数和上游上报的用量', () => {
-    const done = find('← ok-alias · 200 · 首字节');
+    const done = find('← messages ok-alias ⇒ ok-sse ·?·', '200 · 首字节');
     assert.ok(done, out);
-    for (const part of ['· 共 ', 'B · ', '输入 3', '缓存读 1.2k', '输出 7', '费用 $0.000617']) assert.ok(done.includes(part), done);
+    for (const part of ['· 共 ', 'B · ', '输入 3', '缓存读 1.2K', '输出 7', '费用 $0.000617']) assert.ok(done.includes(part), done);
   });
   await t.test('流里的 error 事件、没有 message_stop 就结束，都不算成功', () => {
-    assert.ok(find('✗ err-sse · 200 流内错误', 'overloaded_error: Overloaded'), out);
-    assert.ok(find('⚠ cut-sse · 200 流未收尾'), out);
-    assert.ok(find('✗ oai-broken · 200 流内错误'), out);
+    assert.ok(find('✗ messages err-sse ▗[•.•]▖', '200 流内错误', 'overloaded_error: Overloaded'), out);
+    assert.ok(find('⚠ messages cut-sse ~(·)><', '200 流未收尾'), out);
+    assert.ok(find('✗ messages oai-broken ⇒ gpt-x ◖⚆ᴥ⚆◗', '200 流内错误'), out);
     assert.equal(usage.routes['ok-alias'].successes, 1);
     for (const route of ['err-sse', 'cut-sse', 'oai-broken']) assert.equal(usage.routes[route].errors, 1, route);
+    assert.equal(usage.routes['stalled-after-stop'].successes, 1);
+    assert.equal(usage.routes['stalled-after-stop'].errors, 0);
   });
   await t.test('上游 HTML 错误页只记标题', () => {
-    assert.ok(find('✗ cf-502 · 上游 502', '190515.xyz | 502: Bad gateway'), out);
+    assert.ok(find('✗ messages cf-502 ~(·)><', '上游 502', '190515.xyz | 502: Bad gateway'), out);
   });
-  await t.test('按模型系列改写过请求体时标出来', () => {
-    assert.ok(find('→ gemini-x @anth · 非流式', '[gemini 适配]'), out);
-    assert.ok(!find('→ ok-alias', '适配]'), out);
+  await t.test('Anthropic provider 只对 Gemini 身份指令做例外适配', () => {
+    assert.ok(find('→ messages gemini-x ·?·', '@anth · adapter · 非流式', '输入≈26'), out);
+    assert.ok(find('→ messages gemini-x', '[gemini 适配]'), out);
+    assert.ok(!find('→ messages ok-alias', '适配]'), out);
+  });
+  await t.test('映射、direct / adapter 与适配标记在开始和结束行都保留', () => {
+    assert.ok(find('← messages ok-alias ⇒ ok-sse', '· direct · 200'), out);
+    assert.ok(find('← messages gemini-x', '· adapter · [gemini 适配] · 200'), out);
+    assert.ok(find('→ messages gemini-x ◖⚆ᴥ⚆◗', '@anth · direct'), '无身份句时不应标 adapter\n' + out);
+    assert.ok(find('← messages gemini-x ◖⚆ᴥ⚆◗', '· direct · 200'), out);
+    assert.ok(find('✗ messages oai-broken ⇒ gpt-x', '· adapter · 200 流内错误'), out);
+    assert.ok(!lines.some((l) => / messages gemini-x ⇒ /.test(l)), '无映射时只显示单一模型\n' + out);
+  });
+  await t.test('每个客户端的请求日志带稳定 Unicode 图标标签', () => {
+    for (const badge of ['◖⚆ᴥ⚆◗', '▗[•.•]▖', '~(·)><', '·?·']) {
+      assert.ok(out.includes(`→ messages gemini-x ${badge}`), `${badge}\n${out}`);
+      assert.ok(out.includes(`← messages gemini-x ${badge}`), `${badge}\n${out}`);
+    }
   });
 });
 
@@ -184,7 +214,7 @@ test('gw.js logs：本地时间、只看异常、持续跟随；start 前轮转�
   const port = await freePort();
   const config = join(gateway, 'providers.json');
   await writeFile(config, JSON.stringify({ clientToken: 'cli-client', providers: [{ name: 'p', apiType: 'openai', apiKey: 'fixture-key', baseUrl: 'http://127.0.0.1:1' }], routes: { fixture: 'p' } }));
-  const env = { ...process.env, GATEWAY_PORT: String(port), GATEWAY_HOST: '127.0.0.1', GATEWAY_CONFIG: config };
+  const env = { ...process.env, GATEWAY_PORT: String(port), GATEWAY_HOST: '127.0.0.1', GATEWAY_CONFIG: config, GATEWAY_WEB_ENABLED: '0' };
   const gw = (...args) => exec(process.execPath, ['scripts/gw.js', ...args], { cwd: gateway, env, timeout: 15000, windowsHide: true }).then((r) => strip(r.stdout));
   const outLog = join(gateway, 'logs', 'gateway.out.log');
   let running = false;
@@ -222,7 +252,7 @@ test('gw.js logs：本地时间、只看异常、持续跟随；start 前轮转�
       for (let i = 0; i < 60 && !seen.includes('持续跟随'); i++) await sleep(50);
       await appendFile(outLog, '[2026-09-25 05:04:05.000] [gw_1a2b3c4d] ← x · 200 · 1.0s\n');
       for (let i = 0; i < 60 && !seen.includes('← 成功'); i++) await sleep(50);
-      assert.match(seen, /05:04:05\.000\s+← 成功\s+x\s+1a2b3c4d\s+200 · 1\.0s/);
+      assert.match(seen, /◇\s+1a2b3c4d\s+200 · 1\.0s/);
     } finally {
       const exited = once(child, 'exit');
       child.kill();
@@ -233,17 +263,21 @@ test('gw.js logs：本地时间、只看异常、持续跟随；start 前轮转�
     const original = await readFile(outLog, 'utf8');
     const fixture = [
       '[2026-09-25 09:52:20.000] [gw_11111111] → gemini ⇒ model @p · 流式 · 输入≈54000',
-      '[2026-09-25 09:52:25.814] [gw_11111111] ← gemini · 200 · 首字节 5.2s · 共 5.4s · 输入 54.1k · 缓存读 1.2k · 输出 36 · 费用 $0.000617',
-      '[2026-09-25 09:52:26.000] [gw_22222222] ✗ gemini-pro · 200 流内错误 · overloaded_error: boom',
+      '[2026-09-25 09:52:25.814] [gw_11111111] ← gemini ⇒ gemini-3.8 · 200 · 首字节 5.2s · 共 5.4s · 输入 54.1k · 缓存读 1.2k · 输出 36 · 费用 $0.000617',
+      '[2026-09-25 09:52:26.000] [gw_22222222] ✗ gemini-pro ⇒ gemini-3.8 · 200 流内错误 · overloaded_error: boom',
       '[2026-09-25 09:52:27.000] [gw_33333333] ↻ 中文路由 · 1.3s 后第 1 次重试 · HTTP 429',
       '[2026-09-25 09:52:28.000] [gw_44444444] ⊘ gemini · 客户端已断开',
       '[2026-09-26 00:00:00.001] [gw_55555555] ⚠ 中文超长路由名字用于验证窄屏展示 · 200 流未收尾 · 尾部诊断不可丢失',
+      '[2026-09-26 00:00:00.002] [gw_88888888] → responses gpt-6-sol ◈ @openai · direct',
     ].join('\n') + '\n';
     try {
       await writeFile(outLog, fixture);
       const shown = await gw('logs', '10');
       for (const label of ['紧凑', '时间', '状态', '路由', '请求 ID', '2026-09-25', '2026-09-26', '成功', '失败', '警告', '重试', '取消', '54.1k', '5.2s', '流内错误', '尾部诊断不可丢失']) assert.ok(shown.includes(label), label + '\n' + shown);
+      assert.match(shown, /responses\s+◖⚆ᴥ⚆◗\s+88888888\s+gpt-6-sol @openai/);
       const colored = await exec(process.execPath, ['scripts/gw.js', 'logs', '10'], { cwd: gateway, env: { ...env, FORCE_COLOR: '1', NO_COLOR: undefined }, timeout: 15000 });
+      assert.match(colored.stdout, /\u001b\[36m\u001b\[1mgemini\s*\u001b\[0m/);
+      assert.match(colored.stdout, /\u001b\[35m\u001b\[1mgemini-3\.8\u001b\[0m/);
       assert.match(colored.stdout, /\u001b\[34m输入 54\.1k\u001b\[0m/);
       assert.match(colored.stdout, /\u001b\[35m缓存读 1\.2k\u001b\[0m/);
       assert.match(colored.stdout, /\u001b\[32m输出 36\u001b\[0m/);
@@ -261,12 +295,32 @@ test('gw.js logs：本地时间、只看异常、持续跟随；start 前轮转�
       const raw = await exec(process.execPath, ['scripts/gw.js', 'logs', '10', '--raw'], { cwd: gateway, env, timeout: 15000 });
       assert.equal(raw.stdout.replace(/\r\n/g, '\n'), fixture);
       assert.equal(await gw('logs', '--raw', '--id', 'abcdef12'), '');
-      const narrow = await gw('logs', '10', '--width', '60');
+      const mascotFixture = [
+        '[2026-09-26 00:01:00.001] [gw_aaaaaaa1] → responses claude ▗[•.•]▖ @claude · direct',
+        '[2026-09-26 00:01:00.002] [gw_aaaaaaa2] → responses codex ◖⚆ᴥ⚆◗ @openai · direct',
+        '[2026-09-26 00:01:00.003] [gw_aaaaaaa3] → responses ds ~(·)>< @deepseek · direct',
+        '[2026-09-26 00:01:00.004] [gw_aaaaaaa4] → responses dsh ⬢[DSH]⬢ @deepseek · direct',
+        '[2026-09-26 00:01:00.005] [gw_aaaaaaa5] → responses gemini ▼(´ᴥ`)▼ @gemini · direct',
+        '[2026-09-26 00:01:00.006] [gw_aaaaaaa6] → responses unknown ◇[client]◇ @unknown · direct',
+      ].join('\n') + '\n';
+      await writeFile(outLog, mascotFixture);
+      const mascotShown = await gw('logs', '20');
+      for (const badge of ['▗[•.•]▖', '◖⚆ᴥ⚆◗', '~(·)><', '▼(ᴥ)▼', '◇']) assert.ok(mascotShown.includes(badge), badge + '\n' + mascotShown);
+      const coloredMascots = await exec(process.execPath, ['scripts/gw.js', 'logs', '20', '--width', '80'], { cwd: gateway, env: { ...env, FORCE_COLOR: '1', NO_COLOR: undefined }, timeout: 15000 });
+      assert.match(coloredMascots.stdout, /\u001b\[38;2;215;119;87m\s*▗\[•\.•\]▖\s*\u001b\[0m/);
+      assert.match(coloredMascots.stdout, /\u001b\[38;2;14;165;233m\s*◖⚆ᴥ⚆◗\s*\u001b\[0m/);
+      assert.doesNotMatch(coloredMascots.stdout, /\u001b\[36m[^\u001b\n]*▗\[•\.•\]▖/);
+      await writeFile(outLog, fixture);
+      const layouts = await Promise.all([40, 60, 80, 100].map(async (width) => [await gw('logs', '10', '--width', String(width)), width]));
+      const narrow = layouts.find(([, width]) => width === 60)[0];
       assert.ok(narrow.includes('窄屏') && narrow.includes('尾部诊断不可丢失') && narrow.includes('中文超长路由名字用于验证窄屏展示'), narrow);
-      const wide = await gw('logs', '10', '--width', '100');
-      for (const [output, width] of [[narrow, 60], [wide, 100]]) {
+      for (const [output, width] of layouts) {
         for (const line of output.split('\n')) {
-          const actual = [...line].reduce((sum, ch) => sum + (/[^\x00-\xff]/u.test(ch) && !/[·←→✓✗⚠↻⊘≈…─]/u.test(ch) ? 2 : 1), 0);
+          const actual = [...line].reduce((sum, ch) => {
+            const cp = ch.codePointAt(0);
+            const wide = cp >= 0x1100 && (cp <= 0x115f || cp === 0x2329 || cp === 0x232a || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe10 && cp <= 0xfe19) || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff01 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6) || cp >= 0x20000);
+            return sum + (wide ? 2 : 1);
+          }, 0);
           assert.ok(actual <= width, 'overflow: ' + actual + ' ' + line);
         }
       }
@@ -397,5 +451,32 @@ test('gw.js logs：本地时间、只看异常、持续跟随；start 前轮转�
     assert.match(fresh.split('\n')[0], /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] 网关已启动 /);
     await gw('stop');
     running = false;
+  });
+
+  await t.test('clean-logs：按保留天数清理旧归档和 usage，保留当前文件', async () => {
+    const archive = join(gateway, 'logs', 'archive');
+    const oldAt = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    await mkdir(archive, { recursive: true });
+    await writeFile(join(archive, 'gateway.out.20260101-010101.log'), 'old\n');
+    await writeFile(join(archive, 'gateway.out.20260102-010101.log'), 'keep\n');
+    await utimes(join(archive, 'gateway.out.20260101-010101.log'), oldAt, oldAt);
+    const recentAt = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    await utimes(join(archive, 'gateway.out.20260102-010101.log'), recentAt, recentAt);
+    await writeFile(join(gateway, 'logs', 'usage-2025-01.jsonl'), '{}\n');
+    await utimes(join(gateway, 'logs', 'usage-2025-01.jsonl'), oldAt, oldAt);
+    const now = new Date();
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const currentUsage = join(gateway, 'logs', `usage-${month}.jsonl`);
+    await writeFile(currentUsage, '{}\n');
+    const preview = await gw('clean-logs', '--days', '30', '--keep', '1', '--dry-run');
+    assert.match(preview, /清理预览完成：2 个文件/);
+    assert.equal(await stat(join(archive, 'gateway.out.20260101-010101.log')).then(() => true).catch(() => false), true);
+    const cleaned = await gw('clean-logs', '--days', '30', '--keep', '1');
+    assert.match(cleaned, /日志清理完成：2 个文件/);
+    assert.equal(await stat(join(archive, 'gateway.out.20260101-010101.log')).then(() => true).catch(() => false), false);
+    assert.equal(await stat(join(archive, 'gateway.out.20260102-010101.log')).then(() => true).catch(() => false), true);
+    assert.equal(await stat(join(gateway, 'logs', 'usage-2025-01.jsonl')).then(() => true).catch(() => false), false);
+    assert.equal(await stat(currentUsage).then(() => true).catch(() => false), true);
+    assert.equal(await stat(outLog).then(() => true).catch(() => false), true);
   });
 });

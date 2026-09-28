@@ -6,7 +6,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, env, redact } from './config.js';
-import { calculateCostUsd } from './pricing.js';
+import { calculateCostUsd, modelPrice } from './pricing.js';
 
 const MAX_RECENT = 200;
 const startedAt = new Date().toISOString();
@@ -29,6 +29,7 @@ function bucket() {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     costUsd: 0,
+    baseCostUsd: 0,
     pricedRequests: 0,
     unpricedRequests: 0,
   };
@@ -115,13 +116,19 @@ export function estimateInputTokens(body) {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
-export function beginUsage({ requestId, route, provider, model, pricing, estimatedInputTokens }) {
+export function beginUsage({ requestId, route, provider, model, clientType = 'unknown', inputProtocol, upstreamProtocol, adapter, pricing, priceMultiplier = null, pricingRevision, pricingEffectiveAt, estimatedInputTokens }) {
   const entry = {
     requestId,
     route,
     provider,
     model,
+    clientType: clientType || 'unknown',
+    inputProtocol, upstreamProtocol, adapter,
     pricing,
+    priceMultiplier,
+    pricingRevision,
+    pricingEffectiveAt,
+    requestStartedAt: new Date().toISOString(),
     startedAt: performance.now(),
     estimatedInputTokens: tokenCount(estimatedInputTokens) ?? 0,
     usage: null,
@@ -158,6 +165,12 @@ export function finishUsage(entry, { status = 500, usage, error } = {}) {
     route: entry.route,
     provider: entry.provider,
     model: entry.model,
+    clientType: entry.clientType,
+    inputProtocol: entry.inputProtocol,
+    upstreamProtocol: entry.upstreamProtocol,
+    adapter: entry.adapter,
+    pricingRevision: entry.pricingRevision,
+    pricingEffectiveAt: entry.pricingEffectiveAt,
     status: code,
     durationMs: Math.max(0, Math.round(performance.now() - entry.startedAt)),
     usageSource: u ? 'reported' : 'none',
@@ -167,7 +180,13 @@ export function finishUsage(entry, { status = 500, usage, error } = {}) {
     cacheWriteTokens: u?.cacheWrite ?? 0,
     estimatedInputTokens: entry.estimatedInputTokens,
   };
-  item.costUsd = u ? calculateCostUsd(u, entry.pricing, entry.model) : null;
+  // baseCostUsd 为全局模型原价；costUsd 为按站点逐项倍率（输入/缓存读/缓存写/输出）计算的实际费用
+  item.baseCostUsd = u ? calculateCostUsd(u, entry.pricing, entry.model) : null;
+  if (entry.priceMultiplier) item.priceMultiplier = entry.priceMultiplier;
+  // 记下当时的单价，管理页据此展示逐项计费过程；之后改价不影响已记账的明细
+  const price = item.baseCostUsd === null ? undefined : modelPrice(entry.pricing, entry.model);
+  if (price) item.unitPrice = { input: price.input, output: price.output, cacheRead: price.cacheRead, cacheWrite: price.cacheWrite };
+  item.costUsd = u ? calculateCostUsd(u, entry.pricing, entry.model, entry.priceMultiplier) : null;
   if (error) item.error = summarizeError(error);
   entry.result = item;
 
@@ -183,6 +202,7 @@ export function finishUsage(entry, { status = 500, usage, error } = {}) {
     if (item.costUsd === null) target.unpricedRequests += u ? 1 : 0;
     else {
       target.costUsd += item.costUsd;
+      target.baseCostUsd += item.baseCostUsd;
       target.pricedRequests++;
     }
   }
@@ -209,6 +229,13 @@ export function usageStats({ activeRequests = 0 } = {}) {
       route: e.route,
       provider: e.provider,
       model: e.model,
+      clientType: e.clientType,
+      inputProtocol: e.inputProtocol,
+      upstreamProtocol: e.upstreamProtocol,
+      adapter: e.adapter,
+      requestStartedAt: e.requestStartedAt,
+      pricingRevision: e.pricingRevision,
+      pricingEffectiveAt: e.pricingEffectiveAt,
       elapsedMs: Math.round(now - e.startedAt),
       estimatedInputTokens: e.estimatedInputTokens,
       // 流式请求收到 message_start 后就知道本次上下文有多大

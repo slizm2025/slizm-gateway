@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { upstreamFetch, readResponseText } from '../src/upstream-fetch.js';
 import { openAIToAnthropicStream } from '../src/stream.js';
 import { buildHeaders } from '../src/providers/anthropic.js';
-import { adaptBodyForModelSeries } from '../src/model-series.js';
+import { adaptBodyForModelSeries, adaptResponsesBodyForModelSeries } from '../src/model-series.js';
 import { parseCompletion as geminiCompletion, normalizeBaseUrl } from '../src/providers/gemini.js';
 
 const exec = promisify(execFile);
@@ -90,6 +90,19 @@ test('Gemini URLs, series adaptation and SSE aggregation remain compatible', asy
   assert.equal(rewritten.system, 'You are an AI coding agent.');
   assert.equal(rewritten.messages[0].content, body.messages[0].content);
   assert.equal(body.system, 'You are a Claude agent.');
+  for (const [input, expected] of [
+    ['You are Codex, a coding agent based on GPT-5. You share a workspace.', 'You are an AI coding agent. You share a workspace.'],
+    ['You are ChatGPT, built on GPT-5.1-codex.\nNext line.', 'You are an AI coding agent.\nNext line.'],
+    ['You are clumsy in the git console. Codex is fine.', 'You are clumsy in the git console. Codex is fine.'],
+  ]) assert.equal(adaptBodyForModelSeries({ system: input }, 'gemini-test').system, expected);
+  const codexBody = { instructions: 'You are Codex, based on GPT-5.', input: [{ role: 'developer', content: [{ type: 'input_text', text: 'You are Codex.' }] }, { role: 'user', content: 'You are Codex.' }] };
+  const codexOut = adaptResponsesBodyForModelSeries(codexBody, 'gemini-test');
+  assert.equal(codexOut.instructions, 'You are an AI coding agent.');
+  assert.equal(codexOut.input[0].content[0].text, 'You are an AI coding agent.');
+  assert.equal(codexOut.input[1].content, 'You are Codex.');
+  assert.equal(adaptResponsesBodyForModelSeries(codexBody, 'gpt-6-sol'), codexBody, '其他系列原样返回');
+  const plain = { instructions: 'Be concise.', input: 'hi' };
+  assert.equal(adaptResponsesBodyForModelSeries(plain, 'gemini-test'), plain, '没有身份句时返回同一个对象');
   const response = new Response('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
   assert.equal((await geminiCompletion(response)).choices[0].message.content, 'ok');
 });
@@ -109,7 +122,7 @@ test('isolated configuration and management commands', async (t) => {
   const cfg = { clientToken: 'fixture-client-token', providers: [{ name: 'p', apiType: 'openai', apiKey: 'fixture-key', baseUrl: 'http://127.0.0.1:1' }], routes: { fixture: 'p' } };
   await writeFile(cfgPath, JSON.stringify(cfg));
   await writeFile(join(gateway, '.env'), 'GATEWAY_PORT=1\n');
-  const env = { ...process.env, GATEWAY_PORT: String(port), GATEWAY_HOST: '127.0.0.1', GATEWAY_CONFIG: cfgPath };
+  const env = { ...process.env, GATEWAY_PORT: String(port), GATEWAY_HOST: '127.0.0.1', GATEWAY_CONFIG: cfgPath, GATEWAY_WEB_ENABLED: '0' };
   const run = (...args) => exec(process.execPath, args, { cwd: gateway, env, timeout: 15000, windowsHide: true });
   let running = false;
   t.after(async () => {

@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-09-26
+
+### Codex 直通请求正常完成却记为 `⊘ 499 客户端断开`
+
+**现象**：修复 gemini 后 Codex 可正常对话，但日志仍是 `⊘ responses gemini · 499 · 3.2s · 客户端断开 · 输入 16.0k · 输出 34`；gpt-6-luna / gpt-6-astra / deepseek-slizm 的直通请求也大量出现带完整用量的 499。
+
+**根因**：Codex 读到 `response.completed` 就关闭连接，不等流结束；sub2api 在发出该事件后还要 30~40ms 才结束流（实测 gemini 42ms、luna 31ms）。网关在上游收尾前看到客户端关闭，按取消记账。
+
+**证据**：`gw_7b3b1778` 的 Codex 会话记录在 09:41:34.552 写入完整回复并 `task_complete`，网关 ⊘ 在 34.540；sub2api 对同一请求记 200。
+
+**改动**：`src/server.js` 直通路径的 Responses 监视器记录终止事件（`response.completed` / `incomplete` / `failed` / `error`）；终止事件已写给客户端后的断开按正常结束记账（`←` 200，或上游失败时 `✗`），之前的断开仍记 `⊘ 499` 并立即取消上游。
+
+**验证**：`scripts/test-responses.mjs` 新增“发完 completed 后延迟 500ms 收尾、客户端读到 completed 即断开”用例，旧逻辑下复现 `⊘ 499`，修复后为 `← 200`；`npm test` 退出码 0（node:test 125/125）。
+
+### Codex 调 gemini 无响应：Codex 身份句被 Google 拒绝
+
+**现象**：Codex Desktop 选 `gemini`（sub2api `gemini-3.8-flash-high`）连发 "hi" 都失败：网关日志全是 `↻ responses gemini … HTTP 503 No available accounts`，偶尔 `429 All available accounts are currently rate-limited`。同一时段 Claude Code 走 `/v1/messages` 调 gemini 正常 200。
+
+**根因**：与 2026-09-24 的 scout 问题同类。Codex 的 `instructions` 首行固定是 `You are Codex, a coding agent based on GPT-5.`，Google Antigravity 返回不带细节的 `429 RESOURCE_EXHAUSTED`，sub2api 把唯一可调度的号（account 33 `google-pro`）的 `antigravity:gemini` 冷却 59 秒，之后的重试在 20ms 内直接 503。Codex 走 `/v1/responses` 直通路径，此前不经过 `adaptBodyForModelSeries`，且身份句正则只认 Claude/Anthropic。
+
+**证据**：
+- sub2api `ops_error_logs`：Codex Desktop 对 gemini 的 `/v1/responses` 共 4×429、39×503、1×502，零成功；Google 侧均为无 `QUOTA_EXHAUSTED` 细节的裸 429。`usage_logs` 中 gemini 成功全部来自 `/v1/chat/completions`。
+- 对照实验（同 key、同端点、仅身份句不同）：`You are an AI coding agent.` → 200；`You are Codex, a coding agent based on GPT-5.` → 429。
+
+**改动**：
+- `src/model-series.js`：身份句正则扩展到 Codex / ChatGPT / GPT / OpenAI，`GPT-5.1` 这类紧跟非空白的点不算句末；`rewriteIdentity` 兼容 Responses 的 `input_text` 块；新增 `adaptResponsesBodyForModelSeries`，gemini 系列改写 `instructions` 与 system/developer 输入，无改动时返回原对象。
+- `src/server.js`：Codex 直通路径先做系列适配；仅在实际改写时重新序列化，其余请求仍原样转发原始字节。日志标 `[gemini 适配]`。
+
+**验证**：`npm test` 退出码 0（新增单元与直通集成断言）。用临时网关实例回放失败会话的真实 Codex 内容（完整 base_instructions + developer 消息 + "hi"）→ 200。回放不含 Codex 的 tools 定义，工具 schema 兼容性需以实际 Codex 使用为准。
+
+---
+
 ## 2026-09-25
 
 ### 终端日志展示：紧凑布局、请求筛选、详细与原始模式

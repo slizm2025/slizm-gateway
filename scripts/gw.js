@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 网关统一管理入口：start / stop / restart / status / logs / test / health
+// 网关统一管理入口：start / stop / restart / status / logs / clean-logs / test / health
 // 目的：把"起一个后台 node 进程"封装成一条命令，并管住 PID、日志、端口占用。
 // 用法:  node scripts/gw.js <命令>
 import { spawn, execFileSync } from 'node:child_process';
@@ -40,8 +40,29 @@ const C = {
   blue: '\u001b[34m',
   magenta: '\u001b[35m',
   cyan: '\u001b[36m',
+  bold: '\u001b[1m',
 };
 const paint = (c, s) => `${c}${s}${C.reset}`;
+// Compact logs use one-line mascots. Legacy aliases keep old log files readable.
+const CLIENT_MASCOTS = Object.freeze({
+  'claude-code': Object.freeze({ name: 'Claude', badge: '▗[•.•]▖', color: '\x1b[38;2;215;119;87m', aliases: ['▗[•.•]▖', '▗[•..•]▖', '✦'] }),
+  codex: Object.freeze({ name: 'Codex', badge: '◖⚆ᴥ⚆◗', color: '\x1b[38;2;14;165;233m', aliases: ['◖⚆ᴥ⚆◗', '◈'] }),
+  deepseek: Object.freeze({ name: 'DeepSeek', badge: '~(·)><', color: '\x1b[38;2;30;136;229m', aliases: ['~(·)><', '~(· )><', '◆'] }),
+  'deepseek-harness': Object.freeze({ name: 'DeepSeek Harness', badge: '~(·)><', color: '\x1b[38;2;30;136;229m', aliases: ['⬢[DSH]⬢', '⬢'] }),
+  gemini: Object.freeze({ name: 'Gemini', badge: '▼(ᴥ)▼', color: '\x1b[38;2;168;85;247m', aliases: ['▼(ᴥ)▼', '▼(´ᴥ`)▼'] }),
+  unknown: Object.freeze({ name: 'Unknown', badge: '◇', color: '\x1b[38;2;148;163;184m', aliases: ['◇[client]◇', '·?·', '◇'] }),
+});
+const CLIENT_BADGE_ALIASES = Object.entries(CLIENT_MASCOTS)
+  .flatMap(([key, mascot]) => mascot.aliases.map((alias) => ({ key, alias })))
+  .sort((a, b) => b.alias.length - a.alias.length);
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const CLIENT_BADGE_RE = new RegExp(`(?:^|\\s)(${CLIENT_BADGE_ALIASES.map(({ alias }) => escapeRegExp(alias)).join('|')})(?=\\s|$)`, 'u');
+const CLIENT_BADGE_KEYS = new Map(CLIENT_BADGE_ALIASES.map(({ key, alias }) => [alias, key]));
+function colorsEnabled() {
+  if (Object.hasOwn(process.env, "NO_COLOR") && process.env.NO_COLOR !== "0" && process.env.NO_COLOR !== "false") return false;
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== "0") return true;
+  return Boolean(process.stdout.isTTY);
+}
 
 const readEnvValue = env;
 
@@ -99,6 +120,8 @@ async function health() {
 
 const ARCHIVE = join(LOGS, 'archive');
 const ROTATE_BYTES = 10 * 1024 * 1024;
+const DEFAULT_LOG_RETENTION_DAYS = 30;
+const DEFAULT_LOG_KEEP = 5;
 
 /** 启动前轮转：超过 10MB 的日志移进 logs/archive/，每种只留最近 5 份 */
 function rotateIfLarge(path) {
@@ -115,11 +138,98 @@ function rotateIfLarge(path) {
   }
 }
 
+function parseCleanupOptions(args) {
+  const options = { days: DEFAULT_LOG_RETENTION_DAYS, keep: DEFAULT_LOG_KEEP, dryRun: false };
+  const seen = new Set();
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--dry-run') {
+      options.dryRun = true;
+      continue;
+    }
+    const match = /^(--days|--keep)(?:=(.*))?$/.exec(arg);
+    if (!match) throw new Error(`未知选项 ${cleanLogText(arg)}`);
+    const key = match[1].slice(2);
+    if (seen.has(key)) throw new Error(`${match[1]} 只能指定一次`);
+    const value = match[2] ?? args[++i];
+    if (!value || value.startsWith('--') || !/^\d+$/.test(value)) {
+      throw new Error(`${match[1]} 需要一个非负整数`);
+    }
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 0 || number > 3650) {
+      throw new Error(`${match[1]} 必须是 0..3650 的整数`);
+    }
+    options[key] = number;
+    seen.add(key);
+  }
+  return options;
+}
+
+function cleanupLogFiles(args) {
+  const options = parseCleanupOptions(args);
+  const cutoff = Date.now() - options.days * 24 * 60 * 60 * 1000;
+  const currentMonth = (() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  })();
+  const candidates = [];
+
+  if (existsSync(ARCHIVE)) {
+    const archived = readdirSync(ARCHIVE)
+      .filter((name) => /^gateway\.(?:out|err)\.\d{8}-\d{6}\.log$/.test(name))
+      .map((name) => {
+        const path = join(ARCHIVE, name);
+        try {
+          const info = statSync(path);
+          return info.isFile() ? { name, path, mtimeMs: info.mtimeMs, kind: '归档日志' } : null;
+        } catch { return null; }
+      })
+      .filter(Boolean);
+    const byPrefix = new Map();
+    for (const file of archived) {
+      const prefix = file.name.startsWith('gateway.out.') ? 'gateway.out' : 'gateway.err';
+      if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
+      byPrefix.get(prefix).push(file);
+    }
+    for (const files of byPrefix.values()) {
+      files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      candidates.push(...files.slice(options.keep).filter((file) => file.mtimeMs < cutoff));
+    }
+  }
+
+  for (const name of readdirSync(LOGS)) {
+    if (!/^usage-\d{4}-\d{2}\.jsonl$/.test(name) || name.includes(`-${currentMonth}.`)) continue;
+    const path = join(LOGS, name);
+    try {
+      const info = statSync(path);
+      if (info.isFile() && info.mtimeMs < cutoff) candidates.push({ name, path, mtimeMs: info.mtimeMs, kind: 'usage 账本' });
+    } catch {}
+  }
+
+  let removedBytes = 0;
+  for (const file of candidates) {
+    const size = (() => { try { return statSync(file.path).size; } catch { return 0; } })();
+    removedBytes += size;
+    console.log(`${options.dryRun ? '将删除' : '已删除'} ${file.kind}: ${file.name} (${size} bytes)`);
+    if (!options.dryRun) rmSync(file.path, { force: true });
+  }
+  console.log(options.dryRun
+    ? `清理预览完成：${candidates.length} 个文件，${removedBytes} bytes；未修改磁盘。`
+    : `日志清理完成：${candidates.length} 个文件，${removedBytes} bytes。`);
+}
+
+function cmdCleanLogs() {
+  try { cleanupLogFiles(process.argv.slice(3)); }
+  catch (error) { console.error(`日志清理参数错误：${error.message}`); process.exitCode = 1; }
+}
+
 async function cmdStart() {
   const existing = readPid();
   if (existing) {
     console.log(paint(C.yellow, `网关已在运行 (pid ${existing})`));
-    return cmdStatus();
+    await cmdStatus();
+    if (!process.exitCode) await startManagementWeb();
+    return;
   }
   if (await portInUse(HOST, PORT)) {
     console.log(
@@ -167,8 +277,53 @@ async function cmdStart() {
     process.exitCode = 1;
     return;
   }
-  console.log(paint(C.green, `✓ 网关已启动 (pid ${child.pid})  ${BASE}`));
-  console.log(paint(C.dim, `  日志: logs/gateway.out.log   管理: node scripts/gw.js status`));
+  const cClaude = colorsEnabled() ? '\x1b[38;2;215;119;87m' : '';
+  const cCodex = colorsEnabled() ? '\x1b[38;2;14;165;233m' : '';
+  const cWhale = colorsEnabled() ? '\x1b[38;2;30;136;229m' : '';
+  const cGemini = colorsEnabled() ? '\x1b[38;2;168;85;247m' : '';
+  const cReset = colorsEnabled() ? '\x1b[0m' : '';
+  console.log([
+    `${cClaude}      ▄██████████████▄  ${cReset}  ${paint(C.green, `✓ 网关已启动 (pid ${child.pid})  ${BASE}`)}`,
+    `${cClaude}      ██  ████████  ██  ${cReset}  管理: node scripts/gw.js status · 日志: logs/gateway.out.log`,
+    `${cClaude}    ████████████████████${cReset}  Clients: ${cClaude}▗[•..•]▖${cReset} Claude · ${cCodex}◖⚆ᴥ⚆◗${cReset} Codex · ${cWhale}~(· )><${cReset} DeepSeek · ${cGemini}▼(´ᴥ\`)▼${cReset} Gemini`,
+    `${cClaude}      ████████████████  ${cReset}`,
+    `${cClaude}        ██  ██  ██  ██  ${cReset}`,
+  ].join('\n'));
+  await startManagementWeb();
+}
+
+async function startManagementWeb() {
+  if (readEnvValue('GATEWAY_WEB_ENABLED', '1') === '0') return;
+  try {
+    const { ensureWeb } = await import('../src/admin/lifecycle.js');
+    const web = await ensureWeb();
+    console.log(`  管理 Web: ${web.url}  (node scripts/gw.js web 打开并登录)`);
+  } catch (error) {
+    console.log(paint(C.yellow, `  网关已运行，但 ${error.message}`));
+  }
+}
+
+async function cmdWeb() {
+  const args = process.argv.slice(3);
+  if (args.some((arg) => !['--no-open', '--stop'].includes(arg)) || args.length > 1) {
+    console.error('用法: node scripts/gw.js web [--no-open | --stop]');
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const { ensureWeb, stopWeb } = await import('../src/admin/lifecycle.js');
+    if (args.includes('--stop')) {
+      console.log(await stopWeb() ? '管理 Web 已停止，网关不受影响。' : '管理 Web 未运行。');
+      return;
+    }
+    const shouldOpen = !args.includes("--no-open");
+    const web = await ensureWeb({ open: shouldOpen });
+    const hint = shouldOpen ? "已自动打开并登录；手动复制此地址不会带登录凭据" : "仅启动服务，手动打开此地址不会自动登录；请不带 --no-open 重新执行以自动登录";
+    console.log("管理 Web: " + web.url + "（" + hint + "）");
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
 }
 
 function stopTree(pid) {
@@ -286,10 +441,10 @@ function localTime(line) {
 // 展示层不修改磁盘日志；原始模式明确跳过格式转换。
 const cleanLogText = (text) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '').replace(/\t/g, '    ');
 function logPaint(color, text) {
-  const enabled = !Object.hasOwn(process.env, 'NO_COLOR') && (process.env.FORCE_COLOR
-    ? process.env.FORCE_COLOR !== '0'
-    : process.stdout.isTTY);
-  return enabled ? paint(color, text) : text;
+  return colorsEnabled() ? paint(color, text) : text;
+}
+function logStyle(styles, text) {
+  return colorsEnabled() ? `${styles}${text}${C.reset}` : text;
 }
 
 function parseLogOptions(args) {
@@ -335,13 +490,25 @@ function parseLogLine(raw) {
   const match = /^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\](?: \[(gw_[a-f0-9]{8})\])? (.*)$/i.exec(line);
   const body = match?.[4] ?? line;
   const event = /^([→←✗⚠↻⊘]) (\S+)(?: (.*))?$/.exec(body);
-  return { line, date: match?.[1], time: match?.[2], id: match?.[3]?.toLowerCase(), body, icon: event?.[1], route: event?.[2], detail: (event?.[3] ?? '').replace(/^· /, '') };
+  const detail = (event?.[3] ?? '').replace(/^· /, '');
+  const alias = ['messages', 'responses'].includes(event?.[2]) ? /^\S+/.exec(detail)?.[0] : event?.[2];
+  return { line, date: match?.[1], time: match?.[2], id: match?.[3]?.toLowerCase(), body, icon: event?.[1], route: event?.[2], alias, detail };
+}
+function splitClientIcon(detail) {
+  const source = detail ?? '';
+  const match = CLIENT_BADGE_RE.exec(source);
+  if (!match) return { mascot: CLIENT_MASCOTS.unknown, detail: source };
+  const key = CLIENT_BADGE_KEYS.get(match[1]) ?? 'unknown';
+  return {
+    mascot: CLIENT_MASCOTS[key],
+    detail: source.slice(0, match.index) + source.slice(match.index + match[0].length),
+  };
 }
 function matchesLog(raw, options) {
   const entry = parseLogLine(raw);
   return (!options.errors || isProblemLine(entry.line))
     && (!options.id || entry.id === options.id)
-    && (!options.route || entry.route === options.route);
+    && (!options.route || entry.route === options.route || entry.alias === options.route);
 }
 
 const logSegments = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -352,11 +519,18 @@ function charWidth(text) {
   return cp >= 0x1100 && (cp <= 0x115f || cp === 0x2329 || cp === 0x232a || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe10 && cp <= 0xfe19) || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff01 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6) || cp >= 0x20000) ? 2 : 1;
 }
 function logWidth(text) { return [...logSegments.segment(text)].reduce((n, { segment }) => n + charWidth(segment), 0); }
+const MASCOT_COLUMN_WIDTH = Math.max(...Object.values(CLIENT_MASCOTS).map(({ badge }) => logWidth(badge)));
+const API_COLUMN_WIDTH = 12;
 function logPad(text, width) { return text + ' '.repeat(Math.max(0, width - logWidth(text))); }
+function centerPad(text, width) {
+  const extra = Math.max(0, width - logWidth(text));
+  const left = Math.floor(extra / 2);
+  return ' '.repeat(left) + text + ' '.repeat(extra - left);
+}
 function wrapLog(text, width) {
   const lines = []; let line = '';
   // 指标标签和数值保持在一起，避免“费用”与金额分到两行。
-  for (const token of text.match(/(?:首字节|共|输入|缓存读|缓存写|输出|费用)\s+\S+\s*|\S+\s*|\s+/gu) ?? []) {
+  for (const token of text.match(/(?:\S+\s+⇒\s+\S+|⇒\s+\S+)\s*|(?:首字节|共|输入|缓存读|缓存写|输出|费用)\s+\S+\s*|\S+\s*|\s+/gu) ?? []) {
     if (line && logWidth(line + token.trimEnd()) > width) {
       lines.push(line.trimEnd()); line = '';
     }
@@ -378,13 +552,29 @@ function formatLogLine(raw) {
   return logPaint(C.dim, m[1]) + (color ? logPaint(color, m[2]) : m[2]);
 }
 
+function highlightModelIdentity(text) {
+  const match = /^(?:(\S+)\s+⇒\s+)?(⇒\s+)?(\S+)(?=\s|$)/u.exec(text);
+  if (!match || (!match[2] && !text.includes(' ⇒ '))) return { prefix: '', rest: text };
+  const requested = match[1];
+  const target = match[3];
+  const prefix = requested
+    ? `${logStyle(`${C.cyan}${C.bold}`, requested)} ${logPaint(C.dim, '⇒')} ${logStyle(`${C.magenta}${C.bold}`, target)}`
+    : `${logPaint(C.dim, '⇒')} ${logStyle(`${C.magenta}${C.bold}`, target)}`;
+  return { prefix, rest: text.slice(match[0].length) };
+}
+
 // 紧凑视图里把用户最常查的指标从长详情中提出来；不改变源日志文本。
-function highlightLogDetail(text, stateColor) {
+function highlightLogDetail(text, stateColor, isFirstDetailLine) {
   if (!text) return text;
+  const model = isFirstDetailLine ? highlightModelIdentity(text) : { prefix: '', rest: text };
+  text = model.rest;
+  const requested = isFirstDetailLine && !model.prefix ? /^(\S+)(?=\s|$)/u.exec(text) : null;
+  const requestedPrefix = requested ? logStyle(`${C.cyan}${C.bold}`, requested[1]) : '';
+  if (requested) text = text.slice(requested[0].length);
   if (stateColor === C.red || stateColor === C.yellow && /错误|未收尾|上游|HTTP \d{3}/.test(text)) {
-    return logPaint(stateColor, text);
+    return model.prefix + requestedPrefix + logPaint(stateColor, text);
   }
-  const metric = /(?:首字节|共)\s+[^ ·]+|(?:输入|缓存读|缓存写|输出)\s+[^ ·]+|费用\s+\$[^ ·]+/gu;
+  const metric = /(?:首字节|共)\s+[^ ·]+|(?:输入|缓存读|缓存写|输出)\s+[^ ·]+|费用\s+(?:\$|未配置)[^ ·]*/gu;
   let result = '';
   let last = 0;
   for (const match of text.matchAll(metric)) {
@@ -401,7 +591,7 @@ function highlightLogDetail(text, stateColor) {
     result += logPaint(color, match[0]);
     last = match.index + match[0].length;
   }
-  return result + text.slice(last);
+  return model.prefix + requestedPrefix + result + text.slice(last);
 }
 function createLogRenderer(options) {
   let date;
@@ -416,17 +606,32 @@ function createLogRenderer(options) {
     const prefix = entry.date !== date ? logPaint(C.dim, `── ${entry.date} ──`) + '\n' : '';
     date = entry.date;
     const state = entry.icon + ' ' + name;
+    const client = splitClientIcon(entry.detail);
     if (options.width < 100) {
-      const head = `${entry.time}  ${state}  ${entry.id.slice(3)}`;
-      const detail = `${entry.route} · ${entry.detail}`;
-      return prefix + logPaint(color, head) + '\n' + wrapLog(detail, options.width - 2).map((part, i) => '  ' + (i === 0 ? logPaint(C.cyan, entry.route) + (entry.detail ? ' · ' : '') + highlightLogDetail(part.slice(entry.route.length + (entry.detail ? 3 : 0)), color) : highlightLogDetail(part, color))).join('\n');
+      const head = `${entry.time}  ${state}`;
+      // Keep the compact layout stable while coloring the mascot independently:
+      // API -> mascot -> request id. Long API names wrap before the fixed suffix.
+      const suffixWidth = 3 + MASCOT_COLUMN_WIDTH + 2 + 8;
+      const routeWidth = Math.max(1, options.width - 2 - suffixWidth);
+      const routes = wrapLog(entry.route, routeWidth);
+      const routeLines = routes.map((part, index) => {
+        if (index > 0) return '  ' + logStyle(`${C.cyan}${C.bold}`, part);
+        return '  '
+          + logStyle(`${C.cyan}${C.bold}`, logPad(part, routeWidth))
+          + '  '
+           + logPaint(client.mascot.color, centerPad(client.mascot.badge, MASCOT_COLUMN_WIDTH))
+          + '  '
+          + logPaint(C.dim, entry.id.slice(3));
+      });
+      return prefix + logPaint(color, head) + '\n' + routeLines.join('\n') + (client.detail ? '\n' + wrapLog(client.detail, options.width - 2).map((part, idx) => '  ' + highlightLogDetail(part, color, idx === 0)).join('\n') : '');
     }
-    const routes = wrapLog(entry.route, 18);
-    const details = wrapLog(entry.detail, options.width - 52);
+    const routes = wrapLog(entry.route, API_COLUMN_WIDTH);
+    const details = wrapLog(client.detail, options.width - (36 + API_COLUMN_WIDTH + MASCOT_COLUMN_WIDTH));
     const rows = [];
     for (let i = 0; i < Math.max(routes.length, details.length); i++) {
       const detail = details[i] ?? '';
-      rows.push(logPaint(C.dim, logPad(i ? '' : entry.time, 12)) + '  ' + logPaint(color, logPad(i ? '' : state, 6)) + '  ' + logPaint(C.cyan, logPad(routes[i] ?? '', 18)) + '  ' + logPaint(C.dim, logPad(i ? '' : entry.id.slice(3), 8)) + '  ' + highlightLogDetail(detail, color));
+       const mascot = i ? '' : client.mascot.badge;
+       rows.push(logPaint(C.dim, logPad(i ? '' : entry.time, 12)) + '  ' + logPaint(color, logPad(i ? '' : state, 6)) + '  ' + logStyle(`${C.cyan}${C.bold}`, logPad(routes[i] ?? '', API_COLUMN_WIDTH)) + '  ' + logPaint(client.mascot.color, centerPad(mascot, MASCOT_COLUMN_WIDTH)) + '  ' + logPaint(C.dim, logPad(i ? '' : entry.id.slice(3), 8)) + '  ' + highlightLogDetail(detail, color, i === 0));
     }
     return prefix + rows.join('\n');
   };
@@ -503,8 +708,8 @@ async function cmdLogs() {
     console.log(logPaint(C.dim, wrapLog(`── 请求日志 · ${mode} · 最近 ${options.n} 条（末尾 2MB）──`, options.width).join('\n')));
     if (options.id || options.route || options.errors) console.log(logPaint(C.dim, wrapLog(`筛选：${[options.id, options.route, options.errors ? '异常 / 警告 / 重试' : ''].filter(Boolean).join(' · ')}`, options.width).join('\n')));
     if (options.mode === 'compact') console.log(logPaint(C.dim, options.width < 100
-      ? wrapLog('时间 / 状态 / 请求 ID / 路由 / 详情', options.width).join('\n')
-      : `${logPad('时间', 12)}  ${logPad('状态', 6)}  ${logPad('路由', 18)}  ${logPad('请求 ID', 8)}  详情`));
+      ? wrapLog('时间 / 状态 / API / mascot / 请求 ID / 详情', options.width).join('\n')
+      : `${logPad('时间', 12)}  ${logPad('状态', 6)}  ${logPad('API', API_COLUMN_WIDTH)}  ${centerPad('mascot', MASCOT_COLUMN_WIDTH)}  ${logPad('请求 ID', 8)}  详情`));
     if (!selected.length) console.log('(没有匹配的日志)');
   }
   for (const line of selected) console.log(render(line));
@@ -540,12 +745,14 @@ async function cmdTokens() {
   const { printUsageReport } = await import('./usage-report.js');
   let token = 'sk-local-gateway';
   let pricing;
+  let providers;
   try {
     const cfg = loadConfig();
     token = cfg.server.clientToken;
     pricing = cfg.pricing;
+    providers = cfg.providers;
   } catch {}
-  await printUsageReport({ args: process.argv.slice(3), base: BASE, token, pricing });
+  await printUsageReport({ args: process.argv.slice(3), base: BASE, token, pricing, providers });
 }
 
 function cmdTest() {
@@ -705,7 +912,11 @@ function cmdHelp() {
     node scripts/gw.js stop       停止
     node scripts/gw.js restart    重启
     node scripts/gw.js status     状态 + 路由表
-    node scripts/gw.js tokens [today|12h|7d|all]   token 用量报表，默认今天（别名 usage，更多参数见报表末行）
+    node scripts/gw.js web        打开本地管理 Web（自动登录）
+    node scripts/gw.js web --no-open   仅启动管理 Web
+    node scripts/gw.js web --stop      仅停止管理 Web
+    node scripts/gw.js tokens [today|12h|7d|all]   各站点 tokens / USD 消耗，默认今天（别名 usage）
+      --provider 名称 --by model|route|provider --table   筛选站点、分组与明细
     node scripts/gw.js health     原始 /health JSON
     node scripts/gw.js logs [n] [-e] [-f]   紧凑视图，默认 40 条匹配行；-e 异常，-f 跟随 stdout${logHint}
     node scripts/gw.js logs --id <ID>       精确筛选请求，支持 gw_ 前缀或 8 位简写
@@ -714,6 +925,10 @@ function cmdHelp() {
     node scripts/gw.js logs --raw           仅输出 stdout 原始行，无标题；不可与 --detail / --history 同用
     node scripts/gw.js logs --width <列数>  展示宽度 40..240；不足 100 列使用窄屏布局
     node scripts/gw.js logs --history     同时查看历史 stderr（默认折叠已确认的旧进程错误）
+    node scripts/gw.js clean-logs         清理 30 天前的归档日志和 usage 账本
+      --days <天数>                       按文件最后修改时间清理，默认 30
+      --keep <份数>                       每类归档日志至少保留最近几份，默认 5
+      --dry-run                           仅预览，不删除文件
     node scripts/gw.js test       跑全路由自检
     node scripts/gw.js mode       查看当前是网关模式还是直连模式
     node scripts/gw.js mode gateway   切到网关模式（自动备份原配置）
@@ -729,10 +944,14 @@ const table = {
   stop: cmdStop,
   restart: cmdRestart,
   status: cmdStatus,
+  web: cmdWeb,
   tokens: cmdTokens,
   usage: cmdTokens,
   health: cmdHealth,
   logs: cmdLogs,
+  'clean-logs': cmdCleanLogs,
+  'logs-clean': cmdCleanLogs,
+  cleanup: cmdCleanLogs,
   test: cmdTest,
   mode: cmdMode,
   help: cmdHelp,

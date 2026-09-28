@@ -6,8 +6,10 @@
 // Gemini 系列经 Antigravity（Google）转发时，system prompt 里的 Claude 身份句
 // （例如子 agent 首行 "You are a Claude agent, built on Anthropic's Claude Agent SDK."）
 // 会被 Google 拒绝，返回不带细节的 429 RESOURCE_EXHAUSTED（2026-09-24 实测，改写后 200）。
+// Codex 的 instructions 首行 "You are Codex, a coding agent based on GPT-5." 同样被拒（2026-09-25 实测）。
+// 句中 "GPT-5.1" 这类后面紧跟非空白的点不算句末。
 const GEMINI_SERIES = /(^|\/)gemini-/i;
-const CLAUDE_IDENTITY = /You are [^.\n]*(?:Claude|Anthropic)[^.\n]*\./g;
+const VENDOR_IDENTITY = /You are [^.\n]*(?:Claude|Anthropic|Codex|ChatGPT|GPT|OpenAI)(?:[^.\n]|\.(?=\S))*\./g;
 const NEUTRAL_IDENTITY = 'You are an AI coding agent.';
 
 // Claude 系列会校验 thinking 块的签名。网关把 OpenAI 类上游的 reasoning 转成了 thinking 块，这些块没有签名；
@@ -43,14 +45,38 @@ function dropUnsignedThinking(body) {
   return { ...body, messages };
 }
 
+// 兼容 Anthropic 的 text 块和 Responses 的 input_text 块
 function rewriteIdentity(content) {
-  if (typeof content === 'string') return content.replace(CLAUDE_IDENTITY, NEUTRAL_IDENTITY);
+  if (typeof content === 'string') return content.replace(VENDOR_IDENTITY, NEUTRAL_IDENTITY);
   if (!Array.isArray(content)) return content;
   return content.map((b) =>
-    b?.type === 'text' && typeof b.text === 'string'
-      ? { ...b, text: b.text.replace(CLAUDE_IDENTITY, NEUTRAL_IDENTITY) }
+    (b?.type === 'text' || b?.type === 'input_text') && typeof b.text === 'string'
+      ? { ...b, text: b.text.replace(VENDOR_IDENTITY, NEUTRAL_IDENTITY) }
       : b,
   );
+}
+
+/**
+ * OpenAI Responses 请求体（Codex 直通 /v1/responses）的系列适配：
+ * Gemini 系列改写 instructions 和 system/developer 输入里的身份句。
+ * 没有实际改动时原样返回同一个对象，调用方据此决定是否保留原始请求体。
+ */
+export function adaptResponsesBodyForModelSeries(body, upstreamModel) {
+  if (modelSeries(upstreamModel) !== 'gemini') return body;
+  let changed = false;
+  const rewrite = (content) => {
+    const next = rewriteIdentity(content);
+    if (JSON.stringify(next) !== JSON.stringify(content)) changed = true;
+    return next;
+  };
+  const out = { ...body };
+  if (out.instructions !== undefined) out.instructions = rewrite(out.instructions);
+  if (Array.isArray(out.input)) {
+    out.input = out.input.map((item) =>
+      item?.role === 'system' || item?.role === 'developer' ? { ...item, content: rewrite(item.content) } : item,
+    );
+  }
+  return changed ? out : body;
 }
 
 /** 按上游模型系列调整请求体；不属于特例系列、或没有需要改的内容时原样返回同一个对象 */
@@ -66,5 +92,7 @@ export function adaptBodyForModelSeries(body, upstreamModel) {
       m?.role === 'system' ? { ...m, content: rewriteIdentity(m.content) } : m,
     );
   }
-  return out;
+  const changed = JSON.stringify(out.system) !== JSON.stringify(body.system)
+    || JSON.stringify(out.messages) !== JSON.stringify(body.messages);
+  return changed ? out : body;
 }

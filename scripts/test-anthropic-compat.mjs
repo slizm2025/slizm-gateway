@@ -1,5 +1,4 @@
-// 回归测试：Claude Code 的 Accept 通常是 application/json，但 stream=true 仍必须返回 SSE。
-// 假上游故意忽略 stream=true 返回完整 Anthropic JSON，网关应兼容转换为事件流。
+// 回归测试：Anthropic provider 不重建上游响应，正文和 content-type 原样返回。
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
@@ -97,14 +96,11 @@ try {
   /* 测试失败时保留不了也不影响判定 */
 }
 
-const events = [...result.text.matchAll(/^event: ([^\r\n]+)/gm)].map((match) => match[1]);
 const pass = [
   ['网关启动', ready, logs.slice(-500)],
-  // 默认原样透传 Claude Code 的 accept（与直连一致）；上游回 JSON 时由网关转成 SSE
   ['上游收到原样 Accept', upstreamAccept === 'application/json', `actual=${upstreamAccept}`],
-  ['客户端收到 SSE content-type', result.contentType.includes('text/event-stream'), `actual=${result.contentType}`],
-  ['包含完整 Anthropic 事件序列', events.includes('message_start') && events.includes('content_block_delta') && events.includes('message_stop'), events.join(',')],
-  ['包含上游文本', result.text.includes('兼容成功'), result.text.slice(0, 300)],
+  ['客户端收到原样 content-type', result.contentType.includes('application/json'), `actual=${result.contentType}`],
+  ['客户端收到原样 Anthropic JSON', result.text.includes('"type":"message"') && result.text.includes('兼容成功'), result.text.slice(0, 300)],
 ];
 
 let failed = 0;

@@ -4,3 +4,9 @@ providers.local.json
 logs/
 node_modules/
 *.log
+.claude/
+.codegraph/
+.workbuddy/
+out.txt
+test.patch
+cookbook.html

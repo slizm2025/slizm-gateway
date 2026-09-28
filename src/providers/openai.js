@@ -3,7 +3,8 @@
 // 转换规则参考 claude-code-router 与 cc-fleet 的做法。
 import { upstreamFetch, readResponseText } from '../upstream-fetch.js';
 import { openAIChunks } from '../sse.js';
-import { forwardClientHeaders, resolveClientProfile, createCodexContext, buildCodexHeaders, withExtraHeaders } from './client-headers.js';
+import { forwardClientHeaders, forwardEndToEndHeaders, resolveClientProfile, createCodexContext, buildCodexHeaders, withExtraHeaders } from './client-headers.js';
+import { replaceResponseModel } from './response-body.js';
 
 function blocksToText(content) {
   return Array.isArray(content)
@@ -129,18 +130,35 @@ const tokenCount = (value) => {
 };
 
 /**
- * OpenAI usage 换算成 Anthropic 语义。OpenAI 的 prompt_tokens 含缓存命中（prompt_tokens_details.cached_tokens，
- * DeepSeek 原生字段为 prompt_cache_hit_tokens），拆成未缓存输入 + cache_read_input_tokens。
- * 两者之和不变，Claude Code 按 input + cache 计算的上下文占用不受影响。
+ * OpenAI usage 换算成 Anthropic 语义。prompt_tokens / input_tokens 是总输入，
+ * cached_tokens 是缓存读取；cache_write_tokens 是缓存写入。中转可能使用
+ * cache_creation_tokens 等兼容字段，同一批写入只取一个字段，不累加。
+ * DeepSeek 的 prompt_cache_miss_tokens 是普通输入，不代表缓存写入。
  */
 export function anthropicUsageFromOpenAI(usage) {
   if (!usage || !['prompt_tokens', 'input_tokens', 'completion_tokens', 'output_tokens'].some((k) => usage[k] != null)) return {};
   const prompt = tokenCount(usage?.prompt_tokens ?? usage?.input_tokens);
   const cached = Math.min(prompt, tokenCount(
-    usage?.prompt_tokens_details?.cached_tokens ?? usage?.input_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens,
+    usage?.input_tokens_details?.cached_tokens
+      ?? usage?.prompt_tokens_details?.cached_tokens
+      ?? usage?.cached_tokens
+      ?? usage?.cache_read_tokens
+      ?? usage?.cache_read_input_tokens
+      ?? usage?.prompt_cache_hit_tokens,
   ));
-  const out = { input_tokens: prompt - cached, output_tokens: tokenCount(usage?.completion_tokens ?? usage?.output_tokens) };
+  const written = Math.min(prompt - cached, tokenCount(
+    usage?.input_tokens_details?.cache_write_tokens
+      ?? usage?.prompt_tokens_details?.cache_write_tokens
+      ?? usage?.input_tokens_details?.cache_creation_tokens
+      ?? usage?.prompt_tokens_details?.cache_creation_tokens
+      ?? usage?.cache_write_tokens
+      ?? usage?.cache_creation_input_tokens
+      ?? usage?.cache_write_input_tokens
+      ?? usage?.cache_creation_tokens,
+  ));
+  const out = { input_tokens: prompt - cached - written, output_tokens: tokenCount(usage?.completion_tokens ?? usage?.output_tokens) };
   if (cached) out.cache_read_input_tokens = cached;
+  if (written) out.cache_creation_input_tokens = written;
   return out;
 }
 
@@ -179,7 +197,7 @@ export function toAnthropicResponse(oai, requestedModel) {
 }
 
 export function buildOpenAIHeaders(provider, incomingHeaders = {}, options = {}) {
-  if (resolveClientProfile(provider, options.targetModel, options.clientProfile) === 'codex') {
+  if (resolveClientProfile(provider, options.targetModel, options.clientProfile, incomingHeaders) === 'codex') {
     const context = options.codexContext ?? createCodexContext(options.targetModel ?? '', provider.codexReasoningEffort);
     return buildCodexHeaders(provider, context);
   }
@@ -199,6 +217,58 @@ export async function callOpenAI(provider, body, targetModel, signal, incomingHe
     signal,
   });
   return res;
+}
+
+export function buildResponsesHeaders(provider, incomingHeaders = {}) {
+  const headers = forwardEndToEndHeaders(incomingHeaders);
+  delete headers.authorization;
+  delete headers['x-api-key'];
+
+  const incomingEntries = incomingHeaders instanceof Headers ? [...incomingHeaders] : Object.entries(incomingHeaders);
+  const connHeader = incomingEntries.find(([k]) => k.toLowerCase() === 'connection')?.[1];
+  const nominated = new Set(String(connHeader ?? '').toLowerCase().split(',').map((s) => s.trim()));
+
+  if (provider.extraHeaders && typeof provider.extraHeaders === 'object') {
+    const safeExtras = forwardEndToEndHeaders(provider.extraHeaders);
+    for (const [lower, value] of Object.entries(safeExtras)) {
+      if (
+        nominated.has(lower) ||
+        lower === 'authorization' ||
+        lower === 'x-api-key' ||
+        lower === 'user-agent' ||
+        lower === 'originator' ||
+        lower === 'x-app' ||
+        lower === 'session-id' ||
+        lower === 'thread-id' ||
+        lower === 'x-request-id' ||
+        lower.startsWith('x-client-') ||
+        lower.startsWith('x-codex-') ||
+        lower.startsWith('x-claude-') ||
+        lower.startsWith('x-stainless-')
+      ) {
+        continue;
+      }
+      if (!Object.hasOwn(headers, lower)) {
+        headers[lower] = value;
+      }
+    }
+  }
+  if (provider.apiKey) {
+    headers.authorization = 'Bearer ' + provider.apiKey;
+  }
+  return headers;
+}
+
+/** Native OpenAI Responses passthrough; preserve the request except routed model. */
+export async function callResponses(provider, body, targetModel, signal, incomingHeaders = {}, options = {}, rawBody) {
+  const url = `${provider.baseUrl}/responses`;
+  const payload = body.model === targetModel ? rawBody : replaceResponseModel(rawBody, targetModel);
+  return upstreamFetch(provider, url, {
+    method: 'POST',
+    headers: buildResponsesHeaders(provider, incomingHeaders),
+    body: payload,
+    signal,
+  });
 }
 
 /**

@@ -2,7 +2,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizePricing } from './pricing.js';
+import { normalizeMultipliers, normalizePricing } from './pricing.js';
 
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 function loadDotEnv(path) {
@@ -80,14 +80,14 @@ function urlValue(value, label, proxy = false) {
   if (proxy && parsed.pathname !== '/') throw new Error(`${label} 不得带路径`);
   return value.replace(/\/+$/, '');
 }
-export function loadConfig() {
+export function loadConfig(opts = {}) {
   missingSecrets.length = 0;
-  const cfg = record(readJson(env('GATEWAY_CONFIG', join(ROOT, 'providers.json'))), '配置');
+  const cfg = record(opts.raw ?? readJson(opts.configPath ?? env('GATEWAY_CONFIG', join(ROOT, 'providers.json'))), '配置');
   const server = {
     host: env('GATEWAY_HOST', '127.0.0.1'),
     port: integer(env('GATEWAY_PORT', '4000'), 4000, 'GATEWAY_PORT', 65535, 0),
     clientToken: remember(resolveSecret(cfg.clientToken) ?? 'sk-local-gateway'),
-    logRequests: String(env('GATEWAY_LOG_REQUESTS', '1')) !== '0',
+    logRequests: typeof cfg.logRequests === 'boolean' ? cfg.logRequests : String(env('GATEWAY_LOG_REQUESTS', '1')) !== '0',
   };
   if (!Array.isArray(cfg.providers)) throw new Error('providers 必须是数组');
   const providers = new Map();
@@ -101,7 +101,10 @@ export function loadConfig() {
     for (const [k, v] of Object.entries(extraHeaders)) if (/authorization|api[-_]key|token|secret/i.test(k)) remember(String(v));
     const proxy = resolveSecret(p.proxy, { label: `${p.name}.proxy` });
     if (p.allowInsecureTls === true) throw new Error(`${p.name}: 不支持关闭 TLS 校验，请使用受信任证书或 NODE_EXTRA_CA_CERTS`);
+    const messagesTransport = enumValue(p.messagesTransport, 'chat-completions', ['chat-completions', 'responses'], p.name + '.messagesTransport');
+    if (p.apiType !== 'openai' && messagesTransport === 'responses') throw new Error(p.name + ': messagesTransport responses requires apiType openai');
     providers.set(p.name, {
+      messagesTransport,
       name: p.name,
       apiType: enumValue(p.apiType, 'anthropic', ['anthropic', 'openai', 'gemini'], `${p.name}.apiType`),
       clientProfile: enumValue(p.clientProfile, 'auto', ['auto', 'claude', 'codex'], `${p.name}.clientProfile`),
@@ -115,6 +118,7 @@ export function loadConfig() {
       forceStreamAccept: p.forceStreamAccept === true,
       maxConcurrency: integer(p.maxConcurrency, 3, `${p.name}.maxConcurrency`, 1000),
       maxAttempts: integer(p.maxAttempts, 4, `${p.name}.maxAttempts`, 20),
+      priceMultipliers: normalizeMultipliers(p.priceMultipliers, `${p.name}.priceMultipliers`),
       connectTimeoutMs: integer(p.connectTimeoutMs, 30000, `${p.name}.connectTimeoutMs`, 2147483647),
       requestTimeoutMs: integer(p.requestTimeoutMs, 600000, `${p.name}.requestTimeoutMs`, 2147483647),
       codexVersion: p.codexVersion ?? env('CODEX_VERSION', '0.155.0-alpha.16.4'),

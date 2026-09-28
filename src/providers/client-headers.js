@@ -6,12 +6,6 @@ import { randomUUID } from 'node:crypto';
 import { modelSeries } from '../model-series.js';
 
 const INSTALLATION_ID = process.env.CODEX_INSTALLATION_ID || randomUUID();
-const CLIENT_HEADERS = new Set([
-  'user-agent',
-  'accept',
-  'accept-encoding',
-  'x-app',
-]);
 const DROP_HEADERS = new Set([
   'host', 'connection', 'keep-alive', 'proxy-connection', 'proxy-authorization',
   'proxy-authenticate', 'transfer-encoding', 'te', 'trailer', 'upgrade',
@@ -30,9 +24,9 @@ export function forwardEndToEndHeaders(incoming = {}) {
 }
 
 export function forwardClientHeaders(incoming = {}) {
-  return Object.fromEntries(Object.entries(forwardEndToEndHeaders(incoming)).filter(([name, value]) =>
-    value !== '' && (CLIENT_HEADERS.has(name) || /^(x-stainless-|x-claude-|anthropic-)/.test(name)),
-  ));
+  // Preserve the actual client fingerprint as far as the transport allows.
+  // Credentials and hop-by-hop headers were already removed by the helper.
+  return Object.fromEntries(Object.entries(forwardEndToEndHeaders(incoming)).filter(([, value]) => value !== ''));
 }
 
 export function withExtraHeaders(headers, extra = {}) {
@@ -41,15 +35,56 @@ export function withExtraHeaders(headers, extra = {}) {
   return Object.fromEntries(merged);
 }
 
-export function resolveClientProfile(provider, targetModel, override) {
+function hasHeaderPrefix(incoming, prefix) {
+  return [...new Headers(incoming).keys()].some((name) => name.startsWith(prefix));
+}
+
+/** Identify the calling agent from its original request headers. */
+export function detectClient(incoming = {}) {
+  const headers = new Headers(incoming);
+  const ua = (headers.get('user-agent') ?? '').toLowerCase();
+  const app = (headers.get('x-app') ?? '').toLowerCase();
+
+  if (
+    /(?:^|[\s/])claude(?:-code|-cli)?(?:[/\s]|$)/.test(ua)
+    || headers.has('x-claude-code-session-id')
+    || (app === 'cli' && (headers.has('anthropic-version') || hasHeaderPrefix(incoming, 'x-stainless-')))
+  ) return 'claude-code';
+
+  if (
+    /(?:^|[\s/])codex(?:[/\s-]|$)/.test(ua)
+    || headers.has('originator')
+    || hasHeaderPrefix(incoming, 'x-codex-')
+  ) return 'codex';
+
+  if (
+    /deepseek[-_ ]?harness/.test(ua)
+    || headers.has('x-deepseek-harness')
+    || hasHeaderPrefix(incoming, 'x-deepseek-harness-')
+    || headers.get('x-client-name')?.toLowerCase() === 'deepseek-harness'
+    || hasHeaderPrefix(incoming, 'x-harness-')
+  ) return 'deepseek-harness';
+
+  if (/deepseek/.test(ua) || hasHeaderPrefix(incoming, 'x-deepseek-')) return 'deepseek';
+  return 'unknown';
+}
+
+export function resolveClientProfile(provider, targetModel, override, incoming = {}) {
   const profile = override ?? provider.clientProfile ?? 'auto';
-  return profile === 'auto' ? (modelSeries(targetModel) === 'openai' ? 'codex' : 'claude') : profile;
+  const clientType = detectClient(incoming);
+  // An explicit Codex profile is still useful for Claude Code and unknown
+  // callers, but never replace an already-authentic Codex/DeepSeek identity.
+  if (profile !== 'auto') return profile === 'codex' && clientType !== 'claude-code' && clientType !== 'unknown' ? 'claude' : profile;
+  // This is the one intentional fingerprint change: Claude Code loses cache
+  // efficiency when it calls GPT through a Claude-shaped upstream request.
+  return clientType === 'claude-code' && modelSeries(targetModel) === 'openai' ? 'codex' : 'claude';
 }
 
 // Construct once outside the retry loop; safe retries remain the same logical turn.
-export function createRequestProfile(provider, targetModel, override) {
-  const clientProfile = resolveClientProfile(provider, targetModel, override);
-  return { clientProfile, targetModel, ...(clientProfile === 'codex'
+export function createRequestProfile(provider, targetModel, override, incoming = {}) {
+  const clientType = detectClient(incoming);
+  const clientProfile = resolveClientProfile(provider, targetModel, override, incoming);
+  return { clientProfile, clientType, targetModel, ...(clientProfile === 'codex'
     ? { codexContext: createCodexContext(targetModel, provider.codexReasoningEffort) } : {}) };
 }
 

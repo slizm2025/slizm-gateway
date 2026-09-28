@@ -53,9 +53,17 @@ async function listen(server) {
   return server.address().port;
 }
 
-test('OpenAI usage 换算成 Anthropic 语义：缓存命中从输入里拆出', () => {
+test('OpenAI usage 换算成 Anthropic 语义：缓存读取与写入从总输入拆出', () => {
   assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 80 } }), { input_tokens: 20, output_tokens: 7, cache_read_input_tokens: 80 });
   assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 50, completion_tokens: 1, prompt_cache_hit_tokens: 30, prompt_cache_miss_tokens: 20 }), { input_tokens: 20, output_tokens: 1, cache_read_input_tokens: 30 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 52420, completion_tokens: 13, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 52352 } }), { input_tokens: 68, output_tokens: 13, cache_creation_input_tokens: 52352 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ input_tokens: 100, output_tokens: 3, input_tokens_details: { cached_tokens: 30, cache_write_tokens: 60 } }), { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 30, cache_creation_input_tokens: 60 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ input_tokens: 100, output_tokens: 3, input_tokens_details: { cached_tokens: 30, cache_creation_tokens: 60 } }), { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 30, cache_creation_input_tokens: 60 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ input_tokens: 100, output_tokens: 3, cached_tokens: 30, cache_write_tokens: 60 }), { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 30, cache_creation_input_tokens: 60 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 3, prompt_tokens_details: { cache_write_tokens: 60, cache_creation_tokens: 60 }, cache_creation_input_tokens: 60 }), { input_tokens: 40, output_tokens: 3, cache_creation_input_tokens: 60 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ input_tokens: 100, output_tokens: 3, cache_write_tokens: 60 }), { input_tokens: 40, output_tokens: 3, cache_creation_input_tokens: 60 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ input_tokens: 10, output_tokens: 1, input_tokens_details: { cached_tokens: 8, cache_write_tokens: 99 } }), { input_tokens: 0, output_tokens: 1, cache_read_input_tokens: 8, cache_creation_input_tokens: 2 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 52420, completion_tokens: 13, prompt_cache_miss_tokens: 52352 }), { input_tokens: 52420, output_tokens: 13 });
   assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 5, completion_tokens: 7 }), { input_tokens: 5, output_tokens: 7 });
   assert.deepEqual(anthropicUsageFromOpenAI(undefined), {});
 });
@@ -65,6 +73,8 @@ test('模型价格按每百万 token 计算美元费用', () => {
   assert.ok(Math.abs(calculateCostUsd({ input: 3, cacheRead: 1000, cacheWrite: 100, output: 50 }, pricing, 'opus') - 0.001712) < 1e-12);
   assert.equal(calculateCostUsd({ input: 1 }, pricing, 'missing'), null);
   assert.equal(fmtUsd(0.001712), '$0.001712');
+  assert.equal(fmtUsd(0), '$0.000000');
+  assert.equal(fmtUsd(1.25), '$1.250000');
   assert.throws(() => normalizePricing({ opus: { input: -1, output: 2 } }), /大于等于 0/);
 });
 
@@ -205,7 +215,7 @@ test('报表：时间范围、跨月账本、分组汇总与中文列宽', async
 
   assert.equal(displayWidth('请求'), 4);
   assert.equal(displayWidth('\u001b[31m失败\u001b[0m 3'), 6);
-  assert.deepEqual([950, 1234, 12345, 123456, 999_999, 4_560_000].map(fmtTokens), ['950', '1.23k', '12.3k', '123k', '1.00M', '4.56M']);
+  assert.deepEqual([950, 1234, 12345, 123456, 999_999, 4_560_000].map(fmtTokens), ['950', '1.23K', '12.3K', '123K', '1.00M', '4.56M']);
 });
 
 test('图形：堆叠条按数值分格，柱状图按时间分桶、刻度取整', () => {
@@ -325,7 +335,10 @@ test('端到端：经网关的请求写入账本，/v1/usage 与 gw.js tokens �
     { role: 'user', content: '继续' },
   ] });
   assert.ok((await opus.text()).includes('message_stop'));
-  assert.deepEqual(observed.messages[1].content, [{ type: 'text', text: '答案' }], 'Claude 上游不应收到无签名的 thinking');
+  assert.deepEqual(observed.messages[1].content, [
+    { type: 'thinking', thinking: '想一想', signature: '' },
+    { type: 'text', text: '答案' },
+  ], 'Anthropic 上游应收到原始 thinking 内容');
 
   const stats = await (await fetch(`${base}/v1/usage`, { headers: { authorization: 'Bearer usage-client' } })).json();
   assert.equal(stats.inflight.length, 0);
@@ -343,10 +356,96 @@ test('端到端：经网关的请求写入账本，/v1/usage 与 gw.js tokens �
   const { stdout } = await exec(process.execPath, ['scripts/gw.js', 'tokens', 'all'], { cwd: root, env: { ...env, FORCE_COLOR: '0' }, timeout: 15000, windowsHide: true });
   assert.match(stdout, /anth · claude-opus-5-5 +█+▓?▒?░?/, stdout);
   assert.match(stdout, /oai · gpt-6-sol/);
-  assert.match(stdout, /合计 4\.18k tokens/, stdout);
+  assert.match(stdout, /合计 4\.18K tokens/, stdout);
   assert.match(stdout, /^ {2}█{10,}/m, '总量构成条');
-  assert.match(stdout, /██ 缓存读 +3\.80k/, stdout);
+  assert.match(stdout, /██ 缓存读 +3\.80K/, stdout);
   assert.match(stdout, /每小时 token 合计/);
   assert.match(stdout, /在途 0/, stdout);
   assert.ok(!stdout.includes('\u001b['), '关掉颜色后不应有颜色码');
+});
+
+test('在途请求：requestStartedAt 稳定 ISO 格式，elapsedMs 单调递增且不倒退', async () => {
+  const req = beginUsage({
+    requestId: 'gw_inflight_timing',
+    route: 'sonnet',
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-6',
+    estimatedInputTokens: 500,
+  });
+
+  const stats1 = usageStats();
+  const entry1 = stats1.inflight.find((r) => r.requestId === 'gw_inflight_timing');
+  assert.ok(entry1, '初次采集能找到在途请求');
+  assert.equal(typeof entry1.requestStartedAt, 'string');
+  assert.ok(!Number.isNaN(Date.parse(entry1.requestStartedAt)), 'requestStartedAt 应为合法 ISO 时间');
+  assert.ok(entry1.elapsedMs >= 0, '初次 elapsedMs 应大于等于 0');
+
+  // 等待一段时间再采集
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const stats2 = usageStats();
+  const entry2 = stats2.inflight.find((r) => r.requestId === 'gw_inflight_timing');
+  assert.equal(entry2.requestStartedAt, entry1.requestStartedAt, '多次采集 requestStartedAt 必须保持稳定一致');
+  assert.ok(entry2.elapsedMs >= entry1.elapsedMs, 'elapsedMs 必须随时间递增，不可倒退');
+
+  finishUsage(req, { status: 200 });
+  const stats3 = usageStats();
+  assert.equal(stats3.inflight.some((r) => r.requestId === 'gw_inflight_timing'), false);
+});
+
+test('模型请求生命周期：逐阶段更新（开始->输入/上下文->输出阶段->完成/取消）与在途清除', async () => {
+  // 1. 成功请求的生命周期与阶段推进
+  const req = beginUsage({
+    requestId: 'lifecycle-req-1',
+    route: 'sonnet',
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-6',
+    estimatedInputTokens: 300,
+  });
+
+  let snap = usageStats();
+  let inflightItem = snap.inflight.find((r) => r.requestId === 'lifecycle-req-1');
+  assert.ok(inflightItem, '请求开始后进入 inflight 集合');
+  assert.equal(inflightItem.estimatedInputTokens, 300);
+  assert.equal(inflightItem.contextTokens, undefined, '初始尚未收到 usage 报文时 contextTokens 为空');
+  assert.equal(inflightItem.outputTokens, undefined, '初始 outputTokens 为空');
+
+  // 阶段推进：收到 message_start 报文（输入与缓存 token 确定）
+  recordStreamUsage(req, { input_tokens: 150, cache_read_input_tokens: 80, cache_creation_input_tokens: 20 });
+  snap = usageStats();
+  inflightItem = snap.inflight.find((r) => r.requestId === 'lifecycle-req-1');
+  assert.equal(inflightItem.contextTokens, 250, '收到输入及缓存后 contextTokens 为 input + cacheRead + cacheWrite');
+  assert.equal(inflightItem.outputTokens, undefined, '此时尚未产生输出');
+
+  // 阶段推进：收到 message_delta 报文（输出 token 上报）
+  recordStreamUsage(req, { output_tokens: 65 });
+  snap = usageStats();
+  inflightItem = snap.inflight.find((r) => r.requestId === 'lifecycle-req-1');
+  assert.equal(inflightItem.contextTokens, 250);
+  assert.equal(inflightItem.outputTokens, 65, '收到 delta 报文后 outputTokens 得到更新');
+
+  // 正常结束 (200 OK)
+  const finishRes = finishUsage(req, { status: 200 });
+  assert.equal(finishRes.status, 200);
+  assert.equal(finishRes.usageSource, 'reported');
+  assert.equal(finishRes.inputTokens, 150);
+  assert.equal(finishRes.outputTokens, 65);
+  assert.equal(finishRes.cacheReadTokens, 80);
+  assert.equal(finishRes.cacheWriteTokens, 20);
+  assert.equal(usageStats().inflight.some((r) => r.requestId === 'lifecycle-req-1'), false, '请求结束后从 inflight 集合移除');
+
+  // 2. 客户端中断取消请求（499）
+  const cancelReq = beginUsage({
+    requestId: 'lifecycle-req-cancel',
+    route: 'opus',
+    provider: 'anthropic',
+    model: 'claude-opus-5-5',
+    estimatedInputTokens: 120,
+  });
+  recordStreamUsage(cancelReq, { input_tokens: 100, cache_read_input_tokens: 30 });
+  const cancelRes = finishUsage(cancelReq, { status: 499, error: 'Client closed request' });
+  assert.equal(cancelRes.status, 499);
+  assert.equal(cancelRes.inputTokens, 100);
+  assert.equal(cancelRes.cacheReadTokens, 30);
+  assert.equal(usageStats().inflight.some((r) => r.requestId === 'lifecycle-req-cancel'), false, '取消后从 inflight 集合移除');
 });
