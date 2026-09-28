@@ -283,13 +283,20 @@ async function cmdStart() {
   const cWhale = colorsEnabled() ? '\x1b[38;2;30;136;229m' : '';
   const cGemini = colorsEnabled() ? '\x1b[38;2;168;85;247m' : '';
   const cReset = colorsEnabled() ? '\x1b[0m' : '';
-  console.log([
-    `${cClaude}      ▄██████████████▄  ${cReset}  ${paint(C.green, `✓ 网关已启动 (pid ${child.pid})  ${BASE}`)}`,
-    `${cClaude}      ██  ████████  ██  ${cReset}  管理: node scripts/gw.js status · 日志: logs/gateway.out.log`,
-    `${cClaude}    ████████████████████${cReset}  Clients: ${cClaude}▗[•..•]▖${cReset} Claude · ${cCodex}◖⚆ᴥ⚆◗${cReset} Codex · ${cWhale}~(· )><${cReset} DeepSeek · ${cGemini}▼(´ᴥ\`)▼${cReset} Gemini`,
-    `${cClaude}      ████████████████  ${cReset}`,
-    `${cClaude}        ██  ██  ██  ██  ${cReset}`,
-  ].join('\n'));
+  // 启动横幅：橙色猫头（Claude 品牌色），耳朵/眼缝按列对齐，镜像轴在第 10.5 列；
+  // 统一 padEnd(22) 后右侧信息列才对得齐
+  const banner = [
+    '    ▄█▄        ▄█▄',
+    '   █████      █████',
+    ' ▄██████████████████▄',
+    ' ████  ████████  ████',
+    ' █████████  █████████',
+    ' ▀██████████████████▀',
+  ].map((row) => `${cClaude}${row.padEnd(22)}${cReset}`);
+  banner[0] += `  ${paint(C.green, `✓ 网关已启动 (pid ${child.pid})  ${BASE}`)}`;
+  banner[1] += '  管理: node scripts/gw.js status · 日志: logs/gateway.out.log';
+  banner[2] += `  Clients: ${cClaude}▗[•..•]▖${cReset} Claude · ${cCodex}◖⚆ᴥ⚆◗${cReset} Codex · ${cWhale}~(· )><${cReset} DeepSeek · ${cGemini}▼(´ᴥ\`)▼${cReset} Gemini`;
+  console.log(banner.join('\n'));
   await startManagementWeb();
 }
 

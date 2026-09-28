@@ -1590,8 +1590,8 @@
     setSwitchboardMetric(row.calls, formatNumber(model.requests), maxRequests ? Math.log1p(model.requests) / Math.log1p(maxRequests) : 0,
       !model.requests ? "is-none" : !model.errors ? "is-good" : failRate <= 0.05 ? "is-fair" : "is-poor",
       formatNumber(model.requests) + " 次请求" + (model.errors ? " · " + formatNumber(model.errors) + " 次失败" : " · 无失败") + "\n条长为相对请求量，颜色看失败占比");
-    setSwitchboardMetric(row.success, switchboardPercent(ok), ok, switchboardTone(ok, 0.99, 0.95),
-      ok == null ? "暂无已完成的请求" : "成功率 = 成功 / (请求 - 取消)\n≥99% 好 · ≥95% 一般");
+    setSwitchboardMetric(row.success, switchboardPercent(ok), ok, switchboardTone(ok, 0.95, 0.7),
+      ok == null ? "暂无已完成的请求" : "成功率 = 成功 / (请求 - 取消)\n≥95% 好 · ≥70% 一般");
     paintSwitchboardPort(row.port, unknown ? [] : model.liveAgents);
   }
 

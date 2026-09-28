@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<title>子代理编排 · Slizm Gateway</title>
+<style>
+/* ==========================================================================
+   子代理编排 · 原型
+   继承控制台「交换台」设计语言：钴蓝 = 选择与数据，琥珀灯 = 正在发生的活动。
+   本页隐喻：主代理是干线，子代理是接在交换台上的分机；
+   每张卡片一条跳线连到模型插口，实线 = 已接管，虚线 = 内置未接管，琥珀线 = 待写入。
+   ========================================================================== */
+:root {
+  --ground: #eceef2;
+  --panel: #ffffff;
+  --panel-2: #f5f6f9;
+  --panel-3: #ebeef4;
+  --ink: #161b2e;
+  --ink-2: #4e576c;
+  --ink-3: #737b90;
+  --rule: #dde1e9;
+  --rule-strong: #c4cad7;
+
+  --cobalt: #3346d3;
+  --cobalt-strong: #2535b3;
+  --cobalt-wash: #e9ecfd;
+  --cobalt-line: #aab5f3;
+  --on-cobalt: #ffffff;
+
+  --lamp: #e8a317;
+  --lamp-ink: #8f5e00;
+  --lamp-wash: #fdf4de;
+  --lamp-glow: rgba(232, 163, 23, 0.5);
+
+  --ok: #188a5e;
+  --ok-wash: #e2f4eb;
+  --ok-line: #b5e0cb;
+
+  --cabinet: #161b2e;
+  --cabinet-ink: #f3f4f8;
+  --cabinet-ink-2: #9aa2b8;
+  --cabinet-rule: rgba(255, 255, 255, 0.09);
+
+  --shadow-soft: 0 1px 2px rgba(22, 27, 46, 0.04), 0 6px 18px -10px rgba(22, 27, 46, 0.14);
+  --shadow-pop: 0 22px 56px -14px rgba(22, 27, 46, 0.38), 0 2px 6px rgba(22, 27, 46, 0.08);
+
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+  --sidebar-width: 216px;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.36, 0.64, 1);
+
+  --font-display: "Bahnschrift", "DIN Alternate", "DIN Next", "Barlow Semi Condensed", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif;
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+
+  /* 线路颜色：与趋势图按模型细分的色带一致，同一模型永远同色 */
+  --route-gemini: #e8862a;
+  --route-deepseek: #1597c9;
+  --route-claude-opus: #3346d3;
+  --route-claude-sonnet: #7c5ce0;
+  --route-claude-haiku: #a07d12;
+  --route-gpt-astra: #10a37f;
+  --route-gpt-luna: #d4478b;
+  --route-inherit: #8a92a8;
+
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --ground: #0e1118;
+  --panel: #161a24;
+  --panel-2: #1b2030;
+  --panel-3: #232a3b;
+  --ink: #e8ebf3;
+  --ink-2: #aab1c4;
+  --ink-3: #7f879c;
+  --rule: #272d3d;
+  --rule-strong: #363d52;
+
+  --cobalt: #8391ff;
+  --cobalt-strong: #a8b2ff;
+  --cobalt-wash: rgba(131, 145, 255, 0.14);
+  --cobalt-line: rgba(131, 145, 255, 0.5);
+  --on-cobalt: #0e1118;
+
+  --lamp: #f4b63a;
+  --lamp-ink: #f6c45f;
+  --lamp-wash: rgba(244, 182, 58, 0.13);
+  --lamp-glow: rgba(244, 182, 58, 0.55);
+
+  --ok: #43c992;
+  --ok-wash: rgba(67, 201, 146, 0.12);
+  --ok-line: rgba(67, 201, 146, 0.32);
+
+  --cabinet: #0a0d14;
+  --cabinet-ink: #f3f4f8;
+  --cabinet-ink-2: #8b93a9;
+  --cabinet-rule: rgba(255, 255, 255, 0.07);
+
+  --shadow-soft: 0 1px 0 rgba(255, 255, 255, 0.025) inset, 0 8px 22px -12px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 26px 64px -12px rgba(0, 0, 0, 0.75);
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  display: flex;
+  min-height: 100vh;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+.lucide-icon { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.num-font { font-family: var(--font-mono); letter-spacing: -0.01em; }
+button { font-family: inherit; }
+
+/* ==========================================================================
+   侧栏（复用控制台结构）
+   ========================================================================== */
+.sidebar {
+  width: var(--sidebar-width);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 12px 14px;
+  border-right: 1px solid var(--rule);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+.sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 4px 10px 16px; }
+.brand-mark {
+  width: 30px; height: 30px; border-radius: 8px;
+  background: var(--cabinet); color: var(--cabinet-ink);
+  display: grid; place-items: center;
+  font-family: var(--font-display); font-size: 15px; letter-spacing: 0.04em;
+}
+.brand-name { font-family: var(--font-display); font-size: 15px; letter-spacing: 0.06em; line-height: 1.2; }
+.brand-sub { font-size: 10.5px; color: var(--ink-3); letter-spacing: 0.14em; }
+
+.nav { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; flex: 1; }
+.nav-caption { font-size: 10.5px; letter-spacing: 0.16em; color: var(--ink-3); padding: 14px 12px 5px; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--ink-2);
+  font-size: 13.5px; text-align: left; cursor: pointer;
+  transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);
+}
+.nav-item:hover { background: var(--panel-3); color: var(--ink); }
+.nav-item.is-active { background: var(--cobalt); color: var(--on-cobalt); }
+.nav-item.is-active .lucide-icon { stroke-width: 2.2; }
+
+.sidebar-foot { border-top: 1px solid var(--rule); padding: 12px 12px 2px; font-size: 11.5px; color: var(--ink-3); }
+.sidebar-foot .num-font { color: var(--ink-2); }
+
+/* ==========================================================================
+   主区
+   ========================================================================== */
+.main { flex: 1; min-width: 0; padding: 26px 30px 40px; display: flex; flex-direction: column; gap: 16px; }
+
+.page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+.head-title h1 { margin: 0; font-family: var(--font-display); font-size: 25px; font-weight: 600; letter-spacing: 0.02em; line-height: 1.25; }
+.head-sub { margin: 3px 0 0; color: var(--ink-3); font-size: 13px; }
+.head-tools { display: flex; align-items: center; gap: 10px; }
+
+/* 工具切换 */
+.tool-switch {
+  display: inline-flex; gap: 2px; padding: 3px;
+  background: var(--panel-3); border: 1px solid var(--rule); border-radius: 9px;
+}
+.tool-switch button {
+  border: 0; background: transparent; color: var(--ink-2);
+  font-size: 13px; padding: 6px 14px; border-radius: 7px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: background 0.2s var(--ease-out), color 0.2s var(--ease-out);
+}
+.tool-switch button:hover { color: var(--ink); }
+.tool-switch button.is-active { background: var(--cobalt); color: var(--on-cobalt); font-weight: 600; }
+.tool-switch .ts-count { font-family: var(--font-mono); font-size: 11px; opacity: 0.72; }
+
+/* 写入状态 */
+.save-state {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12.5px; padding: 7px 12px; border-radius: 999px;
+  border: 1px solid var(--ok-line); background: var(--ok-wash); color: var(--ok);
+}
+.save-state .ss-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.save-state.is-pending { border-color: var(--lamp-glow); background: var(--lamp-wash); color: var(--lamp-ink); }
+.save-state.is-pending .ss-dot { background: var(--lamp); box-shadow: 0 0 0 0 var(--lamp-glow); animation: lamp-pulse 1.8s infinite; }
+@keyframes lamp-pulse {
+  0% { box-shadow: 0 0 0 0 var(--lamp-glow); }
+  70% { box-shadow: 0 0 0 6px rgba(232, 163, 23, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(232, 163, 23, 0); }
+}
+
+.icon-btn {
+  width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--rule);
+  background: var(--panel); color: var(--ink-2); cursor: pointer;
+  display: grid; place-items: center;
+  transition: border-color 0.15s, color 0.15s;
+}
+.icon-btn:hover { border-color: var(--rule-strong); color: var(--ink); }
+
+/* ==========================================================================
+   机柜条：配置来源与全局默认
+   ========================================================================== */
+.cabinet {
+  background: var(--cabinet); color: var(--cabinet-ink);
+  border-radius: var(--radius-l);
+  padding: 15px 20px;
+  display: flex; align-items: center; gap: 26px; flex-wrap: wrap;
+  box-shadow: var(--shadow-soft);
+}
+.cab-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cab-label { font-size: 10.5px; letter-spacing: 0.14em; color: var(--cabinet-ink-2); text-transform: uppercase; }
+.cab-value { font-family: var(--font-mono); font-size: 13px; color: var(--cabinet-ink); display: flex; align-items: center; gap: 8px; }
+.cab-value .dim { color: var(--cabinet-ink-2); }
+.cab-select {
+  font-family: var(--font-mono); font-size: 13px;
+  color: var(--cabinet-ink); background: transparent;
+  border: 1px solid var(--cabinet-rule); border-radius: 6px;
+  padding: 4px 8px; cursor: pointer; max-width: 230px;
+}
+.cab-select:hover { border-color: var(--cabinet-ink-2); }
+.cab-select option { color: #161b2e; }
+.cab-spacer { flex: 1; }
+.cab-stats { display: flex; gap: 26px; }
+.cab-jack-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--route-gemini); flex: none; }
+.cab-jack-dot[data-route="deepseek"] { background: var(--route-deepseek); }
+.cab-jack-dot[data-route="claude-opus-5-5"] { background: var(--route-claude-opus); }
+.cab-jack-dot[data-route="claude-sonnet-5"] { background: var(--route-claude-sonnet); }
+.cab-jack-dot[data-route="claude-haiku-4-5"] { background: var(--route-claude-haiku); }
+.cab-jack-dot[data-route="gpt-6-astra-any"] { background: var(--route-gpt-astra); }
+.cab-jack-dot[data-route="gpt-6-luna"] { background: var(--route-gpt-luna); }
+.cab-jack-dot[data-route="inherit"] { background: var(--route-inherit); }
+
+/* ==========================================================================
+   接线板
+   ========================================================================== */
+.board-head { display: flex; align-items: center; gap: 14px; margin-top: 4px; }
+.board-title { font-family: var(--font-display); font-size: 15px; letter-spacing: 0.1em; color: var(--ink-2); text-transform: uppercase; }
+.legend { display: flex; align-items: center; gap: 16px; margin-left: auto; color: var(--ink-3); font-size: 11.5px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg { width: 30px; height: 12px; }
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.agent-card {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-m);
+  padding: 15px 17px 13px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
+  display: flex; flex-direction: column; gap: 8px;
+  transition: border-color 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out), transform 0.18s var(--ease-out);
+  animation: card-in 0.5s var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 50ms);
+}
+.agent-card:hover { border-color: var(--cobalt-line); box-shadow: var(--shadow-soft); transform: translateY(-1px); }
+.agent-card:hover .card-edit-hint { opacity: 1; }
+.agent-card:focus-visible, .icon-btn:focus-visible, .tool-switch button:focus-visible,
+.nav-item:focus-visible, .jack:focus-visible, .drawer-close:focus-visible,
+.btn:focus-visible { outline: 2px solid var(--cobalt); outline-offset: 2px; }
+@keyframes card-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+.card-top { display: flex; align-items: center; gap: 8px; }
+.agent-name { font-family: var(--font-display); font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
+.card-edit-hint { margin-left: auto; color: var(--ink-3); opacity: 0; transition: opacity 0.15s; display: inline-flex; }
+.badge {
+  font-size: 10.5px; letter-spacing: 0.06em; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+}
+.badge-override { background: var(--cobalt-wash); color: var(--cobalt-strong); border: 1px solid var(--cobalt-line); }
+.badge-builtin { background: var(--panel-3); color: var(--ink-3); border: 1px solid var(--rule); }
+.badge-dirty { background: var(--lamp-wash); color: var(--lamp-ink); border: 1px solid var(--lamp-glow); }
+
+.agent-role { margin: 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 39px; }
+
+/* 跳线区 */
+.patch { position: relative; height: 40px; margin: 2px 0; }
+.patch svg.cord { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.patch svg.cord path {
+  fill: none; stroke: var(--cobalt); stroke-width: 2;
+  stroke-linecap: round; vector-effect: non-scaling-stroke;
+  stroke-dasharray: 1; stroke-dashoffset: 0;
+}
+.agent-card.is-entering svg.cord path { animation: cord-draw 0.7s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 50ms + 0.15s); }
+@keyframes cord-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+
+.port-agent {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 10px; border-radius: 3px;
+  border: 2px solid var(--ink-3); background: var(--panel);
+}
+.jack-chip {
+  position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: 7px;
+  background: var(--panel-2); border: 1px solid var(--rule);
+  border-radius: 7px; padding: 4px 10px 4px 8px;
+  max-width: 78%;
+}
+.jack-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.jack-name { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink); }
+.jack-sub { font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
+.cab-jack-dot, .jack-dot { background: var(--route-gemini); }
+.jack-dot[data-route="deepseek"] { background: var(--route-deepseek); }
+.jack-dot[data-route="claude-opus-5-5"] { background: var(--route-claude-opus); }
+.jack-dot[data-route="claude-sonnet-5"] { background: var(--route-claude-sonnet); }
+.jack-dot[data-route="claude-haiku-4-5"] { background: var(--route-claude-haiku); }
+.jack-dot[data-route="gpt-6-astra-any"] { background: var(--route-gpt-astra); }
+.jack-dot[data-route="gpt-6-luna"] { background: var(--route-gpt-luna); }
+.jack-dot[data-route="inherit"] { background: var(--route-inherit); }
+
+.agent-meta {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  border-top: 1px dashed var(--rule); padding-top: 9px; margin-top: 2px;
+  font-size: 11.5px; color: var(--ink-3);
+}
+.agent-meta b { font-weight: 400; color: var(--ink-2); font-family: var(--font-mono); font-size: 11px; }
+
+/* 待写入 / 未接管状态 */
+.agent-card.is-dirty { border-color: var(--lamp-glow); box-shadow: 0 0 0 3px var(--lamp-wash); }
+.agent-card.is-dirty svg.cord path { stroke: var(--lamp); }
+.agent-card.is-builtin { background: var(--panel-2); border-style: dashed; cursor: default; }
+.agent-card.is-builtin .port-agent { border-style: dashed; border-color: var(--rule-strong); }
+.agent-card.is-builtin svg.cord path { stroke-dasharray: 4 4; }
+.agent-card.is-builtin .jack-chip { background: var(--panel); }
+.agent-card.is-builtin .jack-name { color: var(--ink-2); }
+.takeover-row { display: flex; justify-content: flex-end; padding-top: 2px; }
+
+/* ==========================================================================
+   编辑抽屉
+   ========================================================================== */
+.scrim {
+  position: fixed; inset: 0; background: rgba(22, 27, 46, 0.34);
+  opacity: 0; pointer-events: none; transition: opacity 0.3s var(--ease-out); z-index: 40;
+}
+.scrim.is-open { opacity: 1; pointer-events: auto; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 50;
+  width: 440px; max-width: 100vw;
+  background: var(--panel); border-left: 1px solid var(--rule);
+  box-shadow: var(--shadow-pop);
+  transform: translateX(104%);
+  transition: transform 0.45s var(--ease-spring);
+  display: flex; flex-direction: column;
+}
+.drawer.is-open { transform: translateX(0); }
+.drawer-head { padding: 18px 22px 14px; border-bottom: 1px solid var(--rule); display: flex; align-items: flex-start; gap: 10px; }
+.drawer-head-text { flex: 1; min-width: 0; }
+.drawer-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.drawer-title { margin: 0; font-family: var(--font-display); font-size: 19px; font-weight: 600; letter-spacing: 0.02em; }
+.drawer-file { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); margin-top: 4px; word-break: break-all; }
+.drawer-close { width: 30px; height: 30px; border-radius: 7px; border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2); cursor: pointer; display: grid; place-items: center; }
+.drawer-close:hover { color: var(--ink); border-color: var(--rule-strong); }
+
+.drawer-body { flex: 1; overflow-y: auto; padding: 18px 22px; display: flex; flex-direction: column; gap: 16px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field[hidden] { display: none !important; }
+.field-label { font-size: 11px; letter-spacing: 0.12em; color: var(--ink-3); text-transform: uppercase; display: flex; justify-content: space-between; align-items: baseline; }
+.field-label .fl-hint { letter-spacing: 0; text-transform: none; font-size: 11px; color: var(--ink-3); }
+.field-input, .field-select, .field-textarea {
+  font-family: inherit; font-size: 13.5px; color: var(--ink);
+  background: var(--panel-2); border: 1px solid var(--rule); border-radius: var(--radius-s);
+  padding: 8px 11px; width: 100%;
+  transition: border-color 0.15s, background 0.15s;
+}
+.field-input.mono, .field-select.mono { font-family: var(--font-mono); font-size: 12.5px; }
+.field-textarea { resize: vertical; min-height: 120px; line-height: 1.6; }
+.field-input:focus, .field-select:focus, .field-textarea:focus { outline: none; border-color: var(--cobalt); background: var(--panel); }
+.field-inline { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* 模型插口区 */
+.jack-field { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.jack {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 8px 10px; cursor: pointer; text-align: left; color: var(--ink);
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.jack:hover { border-color: var(--cobalt-line); }
+.jack.is-selected { border-color: var(--cobalt); background: var(--cobalt-wash); box-shadow: 0 0 0 1px var(--cobalt) inset; }
+.jack-text { display: flex; flex-direction: column; min-width: 0; }
+.jack-text .jack-name { font-size: 12.5px; }
+.jack-text .jack-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.drawer-foot {
+  border-top: 1px solid var(--rule); padding: 14px 22px;
+  display: flex; align-items: center; gap: 10px; background: var(--panel);
+}
+.btn {
+  border-radius: var(--radius-s); font-size: 13px; padding: 9px 15px; cursor: pointer;
+  border: 1px solid transparent; display: inline-flex; align-items: center; gap: 7px;
+  white-space: nowrap; flex: none;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.btn-primary { background: var(--cobalt); color: var(--on-cobalt); font-weight: 600; }
+.btn-primary:hover { background: var(--cobalt-strong); }
+[data-theme="dark"] .btn-primary:hover { background: var(--cobalt-strong); color: var(--on-cobalt); }
+.btn-ghost { background: transparent; border-color: var(--rule); color: var(--ink-2); }
+.btn-ghost:hover { color: var(--ink); border-color: var(--rule-strong); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.foot-spacer { flex: 1; }
+.foot-note { font-size: 11px; color: var(--ink-3); margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+/* Toast */
+.toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 16px);
+  background: var(--cabinet); color: var(--cabinet-ink);
+  border-radius: 9px; padding: 10px 16px; font-size: 13px;
+  display: flex; align-items: center; gap: 9px;
+  box-shadow: var(--shadow-pop);
+  opacity: 0; pointer-events: none; z-index: 60;
+  transition: opacity 0.3s var(--ease-out), transform 0.3s var(--ease-out);
+}
+.toast.is-show { opacity: 1; transform: translate(-50%, 0); }
+.toast .t-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+
+.foot-note-page { text-align: center; color: var(--ink-3); font-size: 11.5px; margin-top: 6px; }
+.foot-note-page .num-font { font-size: 11px; }
+
+/* ==========================================================================
+   响应式 & 动效偏好
+   ========================================================================== */
+@media (max-width: 960px) {
+  .sidebar { display: none; }
+  .main { padding: 20px 16px 32px; }
+  .drawer { width: 100vw; }
+}
+@media (max-width: 640px) {
+  .page-head { align-items: stretch; flex-direction: column; }
+  .head-tools { flex-wrap: wrap; }
+  .cabinet { gap: 16px; }
+  .field-inline { grid-template-columns: 1fr; }
+  .jack-field { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- 图标 -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <g id="i-dashboard"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></g>
+  <g id="i-chart"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-4 4"/></g>
+  <g id="i-file"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></g>
+  <g id="i-gear"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></g>
+  <g id="i-bot"><path d="M12 8V4"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></g>
+  <g id="i-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>
+  <g id="i-pen"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></g>
+  <g id="i-check"><path d="M20 6 9 17l-5-5"/></g>
+  <g id="i-undo"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></g>
+  <g id="i-save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></g>
+  <g id="i-sun"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></g>
+  <g id="i-moon"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></g>
+</svg>
+
+<aside class="sidebar">
+  <div class="sidebar-brand">
+    <span class="brand-mark">S</span>
+    <div>
+      <div class="brand-name">SLIZM GATEWAY</div>
+      <div class="brand-sub">交换台 · 控制台</div>
+    </div>
+  </div>
+  <nav class="nav" aria-label="控制台主要导航">
+    <span class="nav-caption">运行</span>
+    <button class="nav-item" type="button"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-dashboard"/></svg>运行概览</button>
+    <button class="nav-item" type="button"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-chart"/></svg>用量分析</button>
+    <span class="nav-caption">管理</span>
+    <button class="nav-item" type="button"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-file"/></svg>请求日志</button>
+    <button class="nav-item" type="button"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-gear"/></svg>基础设置</button>
+    <button class="nav-item is-active" type="button" aria-current="page"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-bot"/></svg>子代理</button>
+  </nav>
+  <div class="sidebar-foot">本地网关 · <span class="num-font">127.0.0.1:4100</span></div>
+</aside>
+
+<main class="main">
+  <header class="page-head">
+    <div class="head-title">
+      <h1>子代理编排</h1>
+      <p class="head-sub">主代理是干线，子代理是分机。这里查看每个子代理接到哪条模型线路，改动直接写回工具配置。</p>
+    </div>
+    <div class="head-tools">
+      <div class="tool-switch" role="tablist" aria-label="切换客户端工具">
+        <button type="button" role="tab" data-tool="claude" id="tool-claude" aria-selected="true">Claude Code <span class="ts-count" id="count-claude"></span></button>
+        <button type="button" role="tab" data-tool="codex" id="tool-codex" aria-selected="false">Codex <span class="ts-count" id="count-codex"></span></button>
+      </div>
+      <div class="save-state" id="save-state" role="status"><span class="ss-dot"></span><span id="save-state-text">全部已写入</span></div>
+      <button class="icon-btn" id="theme-toggle" type="button" title="切换明暗主题" aria-label="切换明暗主题">
+        <svg class="lucide-icon" viewBox="0 0 24 24" id="theme-icon"><use href="#i-moon"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <section class="cabinet" id="cabinet" aria-label="配置来源与全局默认">
+    <div class="cab-field">
+      <span class="cab-label">配置根</span>
+      <span class="cab-value" id="cab-root">~/.claude/agents</span>
+    </div>
+    <div class="cab-field">
+      <span class="cab-label">接线情况</span>
+      <span class="cab-value" id="cab-coverage">—</span>
+    </div>
+    <div class="cab-spacer"></div>
+    <div class="cab-field">
+      <span class="cab-label" id="cab-default-label">全局默认模型</span>
+      <span class="cab-value">
+        <span class="cab-jack-dot" id="cab-default-dot" data-route="gemini"></span>
+        <select class="cab-select" id="cab-default-select" aria-label="全局默认子代理模型"></select>
+      </span>
+    </div>
+    <div class="cab-stats" id="cab-extra"></div>
+  </section>
+
+  <div class="board-head">
+    <span class="board-title">接线板</span>
+    <div class="legend">
+      <span><svg viewBox="0 0 30 12" aria-hidden="true"><path d="M2 9 C 10 9, 18 3, 28 3" fill="none" stroke="var(--cobalt)" stroke-width="2" stroke-linecap="round"/></svg>已接管</span>
+      <span><svg viewBox="0 0 30 12" aria-hidden="true"><path d="M2 9 C 10 9, 18 3, 28 3" fill="none" stroke="var(--rule-strong)" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 4"/></svg>内置未接管</span>
+      <span><svg viewBox="0 0 30 12" aria-hidden="true"><path d="M2 9 C 10 9, 18 3, 28 3" fill="none" stroke="var(--lamp)" stroke-width="2" stroke-linecap="round"/></svg>待写入</span>
+    </div>
+  </div>
+
+  <section class="board" id="board" aria-label="子代理列表"></section>
+
+  <p class="foot-note-page">原型演示 · 数据为本机配置快照（<span class="num-font">2026-09-28</span> 读取），「写入配置」仅作交互展示，不落盘。</p>
+</main>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+  <div class="drawer-head">
+    <div class="drawer-head-text">
+      <div class="drawer-title-row">
+        <h2 class="drawer-title" id="drawer-title">—</h2>
+        <span id="drawer-badge"></span>
+      </div>
+      <div class="drawer-file" id="drawer-file"></div>
+    </div>
+    <button class="drawer-close" id="drawer-close" type="button" title="关闭" aria-label="关闭编辑抽屉">
+      <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-x"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body">
+    <div class="field-inline" id="f-row-1">
+      <div class="field">
+        <label class="field-label" for="f-name">名称</label>
+        <input class="field-input mono" id="f-name" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field" id="f-effort-wrap" hidden>
+        <label class="field-label" for="f-effort">推理力度</label>
+        <select class="field-select mono" id="f-effort">
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label class="field-label" for="f-role">作用 <span class="fl-hint">写清「什么时候委派给它」，主代理按这句决定派发</span></label>
+      <textarea class="field-textarea" id="f-role" rows="3" style="min-height:72px"></textarea>
+    </div>
+    <div class="field">
+      <span class="field-label" id="jack-label">模型线路 <span class="fl-hint">插到网关的某条路由上</span></span>
+      <div class="jack-field" id="jack-field" role="listbox" aria-labelledby="jack-label"></div>
+    </div>
+    <div class="field-inline" id="f-row-2">
+      <div class="field" id="f-tools-wrap">
+        <label class="field-label" for="f-tools">工具白名单 <span class="fl-hint">留空 = 全部工具</span></label>
+        <input class="field-input mono" id="f-tools" type="text" autocomplete="off" spellcheck="false" placeholder="Read, Grep, Glob">
+      </div>
+      <div class="field" id="f-sandbox-wrap" hidden>
+        <label class="field-label" for="f-sandbox">沙箱</label>
+        <select class="field-select mono" id="f-sandbox">
+          <option value="workspace-write">workspace-write</option>
+          <option value="read-only">read-only</option>
+          <option value="danger-full-access">danger-full-access</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label class="field-label" for="f-prompt" id="prompt-label">指令内容 <span class="fl-hint" id="prompt-hint">system prompt 正文</span></label>
+      <textarea class="field-textarea" id="f-prompt" rows="10" spellcheck="false"></textarea>
+    </div>
+  </div>
+  <div class="drawer-foot">
+    <span class="foot-note" id="foot-note"></span>
+    <button class="btn btn-ghost" id="btn-reset-builtin" type="button"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-undo"/></svg>恢复内置默认</button>
+    <button class="btn btn-ghost" id="btn-cancel" type="button">取消</button>
+    <button class="btn btn-primary" id="btn-save" type="button"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-save"/></svg>写入配置</button>
+  </div>
+</aside>
+
+<div class="toast" id="toast" role="status"><span class="t-dot"></span><span id="toast-text"></span></div>
+
+<script>
+/* ==========================================================================
+   原型数据：本机真实配置快照
+   路由别名与颜色来自 providers.json（与趋势图色带一致）
+   ========================================================================== */
+const ROUTES = {
+  'gemini':           { sub: 'gemini · gemini-3.8-flash-high',    varName: '--route-gemini' },
+  'deepseek':         { sub: 'deepseek · deepseek-flash',          varName: '--route-deepseek' },
+  'inherit':          { sub: '跟随主会话模型',                      varName: '--route-inherit' },
+  'claude-opus-5-5':  { sub: 'relay-claude · claude-opus-5-5',     varName: '--route-claude-opus' },
+  'claude-sonnet-5':  { sub: 'relay-gpt · gpt-6-sol',              varName: '--route-claude-sonnet' },
+  'claude-haiku-4-5': { sub: 'openai-slizm · gpt-6-luna',          varName: '--route-claude-haiku' },
+  'gpt-6-astra-any':  { sub: 'any-gpt · gpt-6-astra',              varName: '--route-gpt-astra' },
+  'gpt-6-luna':       { sub: 'openai-slizm · gpt-6-luna',          varName: '--route-gpt-luna' },
+};
+
+const TOOLS = {
+  claude: {
+    label: 'Claude Code',
+    root: '~/.claude/agents',
+    fileExt: 'md',
+    defaultLabel: 'CLAUDE_CODE_SUBAGENT_MODEL',
+    defaultModel: 'gemini',
+    jackModels: ['gemini', 'deepseek', 'inherit', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5', 'gpt-6-astra-any'],
+    defaultChoices: ['gemini', 'deepseek', 'inherit', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    extraStats: [],
+    agents: [
+      {
+        id: 'explore', name: 'Explore', source: 'override', model: 'gemini',
+        role: '只读的代码探索：定位文件、符号、调用关系，理解代码结构而不做修改。覆盖内置 Explore。',
+        tools: 'Read, Grep, Glob', effort: null, sandbox: null,
+        prompt: '你负责搜索和定位，不负责做判断或改代码。\n\n## 工作原则\n- 返回位置，不返回大段代码。每条结论配一个精确的 文件:行号 引用。\n- 先广后深。先用 Glob/Grep 摸清范围，再按需 Read 关键片段确认。\n- 区分事实与推测。读到的写「是」，没读到的写「未找到」。\n\n## 边界\n- 不修改任何文件，不读取 node_modules、构建产物、二进制文件。'
+      },
+      {
+        id: 'plan', name: 'Plan', source: 'override', model: 'inherit',
+        role: '只读的方案调研与设计：收集上下文、产出可直接执行的实现方案。覆盖内置 Plan。',
+        tools: 'Read, Grep, Glob', effort: null, sandbox: null,
+        prompt: '你负责设计，不负责实现。\n\n## 工作流程\n1. 先读再想。方案里的每个断言都要有 文件:行号 支撑。\n2. 确认约束。找出会被这次改动影响的既有契约。\n3. 给一个方案，不是一堆选项。\n4. 拆到可执行。每个子任务要能让执行者独立完成。\n\n## 边界\n- 不写代码，不改文件。不编造。不设计超出需求的东西。'
+      },
+      {
+        id: 'general-purpose', name: 'general-purpose', source: 'override', model: 'deepseek',
+        role: '通用编码执行：探索 + 修改、多步实现与复杂任务落地。覆盖内置 general-purpose。',
+        tools: '', effort: null, sandbox: null,
+        prompt: '你负责执行，不负责架构决策。\n\n## 工作原则\n- 严格遵循传入的方案。方案有疑问时，先完成能做的部分，再在结果里指出问题。\n- 改动尽量小。匹配周围代码的既有风格与命名。\n- 不要编造。不确定就 Grep/Read 确认。\n- 验证再报告。能跑测试就跑。'
+      },
+      {
+        id: 'claude', name: 'claude', source: 'override', model: 'deepseek',
+        role: '兜底子代理：处理不归 Explore / Plan / general-purpose 管辖的任务，工具全开放。覆盖内置 claude。',
+        tools: '', effort: null, sandbox: null,
+        prompt: '你负责执行交给你的任务，不负责重新定义整体方案。\n\n## 工作原则\n- 先弄清再动手。不确定的 API、文件、函数，确认后再改。\n- 改动尽量小。不要顺手重构无关代码。\n- 验证再报告。能跑测试/构建就跑。'
+      },
+      {
+        id: 'statusline-setup', name: 'statusline-setup', source: 'builtin', model: 'claude-sonnet-5', locked: true,
+        role: '运行 /statusline 配置状态栏时由产品自动调用。内置固定，模型不可改。',
+        tools: '', effort: null, sandbox: null, prompt: ''
+      },
+      {
+        id: 'claude-code-guide', name: 'claude-code-guide', source: 'builtin', model: 'claude-haiku-4-5', locked: true,
+        role: '回答 Claude Code 功能与用法的问题时由产品自动调用。内置固定，模型不可改。',
+        tools: '', effort: null, sandbox: null, prompt: ''
+      }
+    ]
+  },
+  codex: {
+    label: 'Codex',
+    root: '~/.codex/agents',
+    fileExt: 'toml',
+    defaultLabel: 'default_subagent_model',
+    defaultModel: 'gemini',
+    jackModels: ['gemini', 'deepseek', 'gpt-6-astra-any', 'gpt-6-luna', 'claude-opus-5-5', 'claude-sonnet-5'],
+    defaultChoices: ['gemini', 'deepseek', 'gpt-6-astra-any', 'gpt-6-luna'],
+    extraStats: [ { label: '并发上限', value: '8' }, { label: '子代理开关', value: 'enabled' } ],
+    agents: [
+      {
+        id: 'default', name: 'default', source: 'override', model: 'gemini', effort: 'high', sandbox: 'workspace-write',
+        role: '通用兜底执行代理：独立完成实现、分析与验证类任务。覆盖内置 default。',
+        tools: '', prompt: 'You are the default delegated execution agent.\nWork on bounded tasks assigned by the primary agent.\nFollow the parent task\'s requirements and repository instructions.\nWork independently, keep changes focused, and report concrete results, files changed, and verification performed.\nDo not redefine the overall plan; ask the parent agent when requirements are ambiguous.'
+      },
+      {
+        id: 'explorer', name: 'explorer', source: 'override', model: 'gemini', effort: 'high', sandbox: 'read-only',
+        role: '只读搜索与代码库探索：追踪代码、文档与相关证据。覆盖内置 explorer。',
+        tools: '', prompt: 'You are the search and exploration agent delegated by the primary agent.\nStay read-only: do not modify application or repository files.\nSearch efficiently, trace real execution paths, and distinguish observed facts from hypotheses.\nReturn concise findings with exact file paths, symbols, commands, or source references.'
+      },
+      {
+        id: 'worker', name: 'worker', source: 'override', model: 'gemini', effort: 'high', sandbox: 'workspace-write',
+        role: '面向执行的实现代理：落实聚焦的代码改动与修复。覆盖内置 worker。',
+        tools: '', prompt: 'You are the implementation worker delegated by the primary agent.\nImplement only the bounded task assigned to you.\nPrefer the smallest defensible change, preserve unrelated user changes, and run focused verification.\nReturn a concise summary of the implementation, files changed, tests run, and any remaining risk.'
+      }
+    ]
+  }
+};
+
+/* ==========================================================================
+   状态
+   ========================================================================== */
+const state = {
+  tool: 'claude',
+  drawerAgent: null,
+  dirty: { claude: {}, codex: {} },      // agentId -> {field: newValue}
+  defaultDirty: { claude: null, codex: null },
+  savedFlash: 0,
+};
+
+const $ = (id) => document.getElementById(id);
+const isDirty = (tool, id) => Object.keys(state.dirty[tool][id] || {}).length > 0;
+const dirtyCount = (tool) =>
+  Object.values(state.dirty[tool]).filter(Boolean).filter((d) => Object.keys(d).length).length +
+  (state.defaultDirty[tool] ? 1 : 0);
+
+function routeColor(alias) {
+  const r = ROUTES[alias];
+  return r ? `var(${r.varName})` : 'var(--ink-3)';
+}
+
+/* ==========================================================================
+   渲染：机柜条 + 接线板
+   ========================================================================== */
+function renderCabinet() {
+  const t = TOOLS[state.tool];
+  $('cab-root').textContent = t.root;
+  const overrides = t.agents.filter((a) => a.source === 'override').length;
+  const builtins = t.agents.filter((a) => a.source === 'builtin').length;
+  $('cab-coverage').innerHTML =
+    `已接管 <b>${overrides}</b><span class="dim"> / 内置未接管 ${builtins} · 共 ${t.agents.length}</span>`;
+
+  $('cab-default-label').textContent = t.defaultLabel;
+  const sel = $('cab-default-select');
+  sel.innerHTML = t.defaultChoices.map((m) => `<option value="${m}">${m}</option>`).join('');
+  const current = state.defaultDirty[state.tool] ?? t.defaultModel;
+  sel.value = current;
+  $('cab-default-dot').dataset.route = current;
+
+  $('cab-extra').innerHTML = (t.extraStats || [])
+    .map((s) => `<div class="cab-field"><span class="cab-label">${s.label}</span><span class="cab-value">${s.value}</span></div>`)
+    .join('');
+}
+
+function cordSvg(model, muted) {
+  const color = muted ? '' : ` style="stroke:${routeColor(model)}"`;
+  return `<svg class="cord" viewBox="0 0 200 32" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M12 24 C 62 24, 92 8, 180 8"${color} pathLength="1"/>
+  </svg>`;
+}
+
+function cardMeta(a, tool) {
+  const bits = [];
+  if (tool === 'claude') {
+    bits.push(['工具', a.tools ? a.tools : '全部工具']);
+    bits.push(['配置', a.name + '.' + TOOLS.claude.fileExt]);
+  } else {
+    bits.push(['力度', a.effort || '继承']);
+    bits.push(['沙箱', a.sandbox || '继承']);
+    bits.push(['配置', a.name + '.' + TOOLS.codex.fileExt]);
+  }
+  return bits.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join('');
+}
+
+function renderBoard() {
+  const t = TOOLS[state.tool];
+  const board = $('board');
+  board.innerHTML = t.agents.map((a, i) => {
+    const dirty = isDirty(state.tool, a.id);
+    const model = (state.dirty[state.tool][a.id] || {}).model ?? a.model;
+    const cls = [
+      'agent-card',
+      a.source === 'builtin' ? 'is-builtin' : '',
+      dirty ? 'is-dirty' : '',
+      'is-entering',
+    ].filter(Boolean).join(' ');
+    const badge = dirty
+      ? '<span class="badge badge-dirty">待写入</span>'
+      : a.source === 'override'
+        ? '<span class="badge badge-override">覆盖内置</span>'
+        : '<span class="badge badge-builtin">内置未接管</span>';
+    const takeover = a.source === 'builtin' && !a.locked
+      ? ''
+      : a.source === 'builtin'
+        ? `<div class="takeover-row"><button class="btn btn-ghost" type="button" data-takeover="${a.id}" title="在网关中创建同名覆盖文件，接管这个内置 agent"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-pen"/></svg>接管</button></div>`
+        : '';
+    return `
+    <article class="${cls}" style="--i:${i}" data-agent="${a.id}"
+      role="button" tabindex="0" aria-haspopup="dialog" title="编辑 ${a.name}">
+      <span class="card-top">
+        <span class="agent-name">${a.name}</span>
+        ${badge}
+        <span class="card-edit-hint"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#i-pen"/></svg></span>
+      </span>
+      <p class="agent-role">${a.role}</p>
+      <span class="patch">
+        ${cordSvg(model, a.source === 'builtin')}
+        <span class="port-agent" aria-hidden="true"></span>
+        <span class="jack-chip">
+          <span class="jack-dot" data-route="${model}" style="background:${routeColor(model)}"></span>
+          <span class="jack-text"><span class="jack-name">${model}</span><span class="jack-sub">${ROUTES[model]?.sub || ''}</span></span>
+        </span>
+      </span>
+      <span class="agent-meta">${cardMeta(a, state.tool)}</span>
+      ${takeover}
+    </article>`;
+  }).join('');
+
+  $('count-claude').textContent = TOOLS.claude.agents.length;
+  $('count-codex').textContent = TOOLS.codex.agents.length;
+  renderSaveState();
+}
+
+function renderSaveState() {
+  const n = dirtyCount(state.tool);
+  const el = $('save-state');
+  if (n > 0) {
+    el.classList.add('is-pending');
+    $('save-state-text').textContent = `待写入 · ${n} 处改动`;
+  } else {
+    el.classList.remove('is-pending');
+    $('save-state-text').textContent = state.savedFlash ? '已写入配置' : '全部已写入';
+  }
+}
+
+/* ==========================================================================
+   抽屉
+   ========================================================================== */
+function renderJackField(selected, locked) {
+  const t = TOOLS[state.tool];
+  $('jack-field').innerHTML = t.jackModels.map((m) => `
+    <button type="button" class="jack ${m === selected ? 'is-selected' : ''}" data-model="${m}"
+      role="option" aria-selected="${m === selected}" ${locked ? 'disabled' : ''}>
+      <span class="jack-dot" data-route="${m}" style="background:${routeColor(m)}"></span>
+      <span class="jack-text"><span class="jack-name">${m}</span><span class="jack-sub">${ROUTES[m]?.sub || ''}</span></span>
+    </button>`).join('');
+}
+
+function openDrawer(id) {
+  const t = TOOLS[state.tool];
+  const a = t.agents.find((x) => x.id === id);
+  if (!a) return;
+  state.drawerAgent = id;
+  const d = state.dirty[state.tool][id] || {};
+  const locked = !!a.locked;
+
+  $('drawer-title').textContent = a.name;
+  $('drawer-badge').innerHTML = a.source === 'override'
+    ? '<span class="badge badge-override">覆盖内置</span>'
+    : '<span class="badge badge-builtin">内置未接管</span>';
+  $('drawer-file').textContent = t.root + '/' + a.name + '.' + t.fileExt + (a.source === 'override' ? '' : ' （尚不存在，接管后创建）');
+
+  $('f-name').value = d.name ?? a.name;
+  $('f-role').value = d.role ?? a.role;
+  $('f-prompt').value = d.prompt ?? a.prompt;
+  const model = d.model ?? a.model;
+  renderJackField(model, locked);
+
+  const isClaude = state.tool === 'claude';
+  $('f-tools-wrap').style.display = isClaude ? '' : 'none';
+  $('f-sandbox-wrap').hidden = isClaude;
+  $('f-effort-wrap').hidden = isClaude;
+  $('f-row-1').style.gridTemplateColumns = isClaude ? '1fr' : '1fr 1fr';
+  $('f-row-2').style.gridTemplateColumns = isClaude ? '1fr' : '1fr';
+  if (isClaude) {
+    $('f-tools').value = d.tools ?? a.tools ?? '';
+  } else {
+    $('f-sandbox').value = d.sandbox ?? a.sandbox ?? 'workspace-write';
+    $('f-effort').value = d.effort ?? a.effort ?? 'high';
+  }
+
+  const editable = !locked;
+  ['f-name', 'f-role', 'f-prompt', 'f-tools', 'f-effort', 'f-sandbox'].forEach((f) => { $(f).disabled = !editable; });
+  $('btn-save').disabled = !editable;
+  $('btn-reset-builtin').style.visibility = a.source === 'override' ? 'visible' : 'hidden';
+  $('foot-note').textContent = locked
+    ? '产品内置 agent，模型由客户端固定。'
+    : '原型演示 · 写入不落盘';
+
+  $('scrim').classList.add('is-open');
+  $('drawer').classList.add('is-open');
+  $('drawer-close').focus();
+}
+
+function closeDrawer() {
+  state.drawerAgent = null;
+  $('scrim').classList.remove('is-open');
+  $('drawer').classList.remove('is-open');
+}
+
+/* 草稿标记 */
+function markDirty(field, value) {
+  const id = state.drawerAgent;
+  if (!id) return;
+  const a = TOOLS[state.tool].agents.find((x) => x.id === id);
+  const d = (state.dirty[state.tool][id] = state.dirty[state.tool][id] || {});
+  d[field] = value;
+  if (String(value) === String(a[field] ?? '')) delete d[field];
+  refreshAfterDraft();
+}
+
+/* 草稿变化后：刷新卡片、状态与插口 */
+function refreshAfterDraft() {
+  const id = state.drawerAgent;
+  renderBoard();
+  if (id) {
+    const a = TOOLS[state.tool].agents.find((x) => x.id === id);
+    const d = state.dirty[state.tool][id] || {};
+    const model = d.model ?? a.model;
+    renderJackField(model, !!a.locked);
+    const btn = document.querySelector(`[data-agent="${id}"]`);
+    if (btn) btn.classList.add('is-entering');
+  }
+  renderCabinet();
+}
+
+/* ==========================================================================
+   动作
+   ========================================================================== */
+function saveAll() {
+  const tool = state.tool;
+  Object.entries(state.dirty[tool]).forEach(([id, d]) => {
+    const a = TOOLS[tool].agents.find((x) => x.id === id);
+    if (a && d && Object.keys(d).length) {
+      if (d.name) a.name = d.name;
+      if ('role' in d) a.role = d.role;
+      if ('model' in d) a.model = d.model;
+      if ('prompt' in d) a.prompt = d.prompt;
+      if ('tools' in d) a.tools = d.tools;
+      if ('effort' in d) a.effort = d.effort;
+      if ('sandbox' in d) a.sandbox = d.sandbox;
+    }
+  });
+  const n = dirtyCount(tool);
+  state.dirty[tool] = {};
+  if (state.defaultDirty[tool]) {
+    TOOLS[tool].defaultModel = state.defaultDirty[tool];
+    state.defaultDirty[tool] = null;
+  }
+  state.savedFlash = 1;
+  renderBoard(); renderCabinet();
+  if (state.drawerAgent) openDrawer(state.drawerAgent);
+  toast(`已写入 ${n} 处改动到 ${TOOLS[tool].label} 配置（原型不落盘）`);
+  setTimeout(() => { state.savedFlash = 0; if (!dirtyCount(state.tool)) renderSaveState(); }, 2600);
+}
+
+function resetBuiltin() {
+  const id = state.drawerAgent;
+  if (!id) return;
+  delete state.dirty[state.tool][id];
+  toast('已还原为当前配置（原型不落盘）');
+  renderBoard(); renderCabinet();
+  openDrawer(id);
+}
+
+function takeOver(id) {
+  const t = TOOLS[state.tool];
+  const a = t.agents.find((x) => x.id === id);
+  if (!a) return;
+  a.source = 'override';
+  a.locked = false;
+  a.tools = a.tools ?? '';
+  a.prompt = a.prompt || '（接管后在这里写入这个子代理的指令。）';
+  toast(`已在 ${t.root} 创建 ${a.name}.${t.fileExt}，接管内置 ${a.name}`);
+  renderBoard(); renderCabinet();
+  openDrawer(id);
+}
+
+let toastTimer;
+function toast(msg) {
+  $('toast-text').textContent = msg;
+  $('toast').classList.add('is-show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('toast').classList.remove('is-show'), 2800);
+}
+
+/* ==========================================================================
+   事件绑定
+   ========================================================================== */
+document.querySelectorAll('.tool-switch button').forEach((b) => {
+  b.addEventListener('click', () => {
+    if (b.dataset.tool === state.tool) return;
+    closeDrawer();
+    state.tool = b.dataset.tool;
+    document.querySelectorAll('.tool-switch button').forEach((x) => {
+      const on = x.dataset.tool === state.tool;
+      x.classList.toggle('is-active', on);
+      x.setAttribute('aria-selected', on);
+    });
+    renderCabinet(); renderBoard();
+  });
+});
+
+$('board').addEventListener('click', (e) => {
+  const tk = e.target.closest('[data-takeover]');
+  if (tk) { e.stopPropagation(); takeOver(tk.dataset.takeover); return; }
+  const card = e.target.closest('[data-agent]');
+  if (card) openDrawer(card.dataset.agent);
+});
+
+$('board').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const card = e.target.closest('[data-agent]');
+  if (card) { e.preventDefault(); openDrawer(card.dataset.agent); }
+});
+
+$('jack-field').addEventListener('click', (e) => {
+  const j = e.target.closest('.jack');
+  if (!j || j.disabled) return;
+  markDirty('model', j.dataset.model);
+});
+
+['f-name', 'f-role', 'f-prompt', 'f-tools'].forEach((f) => {
+  $(f).addEventListener('input', (e) => {
+    const key = { 'f-name': 'name', 'f-role': 'role', 'f-prompt': 'prompt', 'f-tools': 'tools' }[f];
+    markDirty(key, e.target.value);
+  });
+});
+$('f-effort').addEventListener('change', (e) => markDirty('effort', e.target.value));
+$('f-sandbox').addEventListener('change', (e) => markDirty('sandbox', e.target.value));
+
+$('cab-default-select').addEventListener('change', (e) => {
+  const t = TOOLS[state.tool];
+  state.defaultDirty[state.tool] = e.target.value === t.defaultModel ? null : e.target.value;
+  $('cab-default-dot').dataset.route = e.target.value;
+  renderSaveState();
+});
+
+$('btn-save').addEventListener('click', saveAll);
+$('btn-cancel').addEventListener('click', closeDrawer);
+$('btn-reset-builtin').addEventListener('click', resetBuiltin);
+$('drawer-close').addEventListener('click', closeDrawer);
+$('scrim').addEventListener('click', closeDrawer);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+
+$('theme-toggle').addEventListener('click', () => {
+  const body = document.body;
+  const next = body.dataset.theme === 'light' ? 'dark' : 'light';
+  body.dataset.theme = next;
+  $('theme-icon').innerHTML = `<use href="#i-${next === 'light' ? 'moon' : 'sun'}"/>`;
+});
+
+/* 启动 */
+renderCabinet();
+renderBoard();
+</script>
+</body>
+</html>
