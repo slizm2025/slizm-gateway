@@ -767,8 +767,8 @@ body.sidebar-collapsed #btn-collapse-sidebar .lucide-icon {
 /* ==========================================================================
    Switchboard (signature)
    ========================================================================== */
-/* 三栏：Agent 请求源 → 线路交换台 → 上游线路。连线画在覆盖整块的 SVG 层上，
-   端点是各卡片边缘的接口圆点；浅灰 = 可用但无数据，有流量时按 Agent 着色流动。 */
+/* 三栏：Agent 请求源 → 线路交换台 → 上游线路。外部 SVG 只连接统一 IN / OUT，
+   adapter 的分配与汇聚由交换台内部独立 SVG 绘制。 */
 .switchboard {
   --agent-claude: #e8a33d;
   --agent-codex: #ffffff;
@@ -833,6 +833,8 @@ body.sidebar-collapsed #btn-collapse-sidebar .lucide-icon {
 /* 连线层 */
 .sb-wires { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
 .sb-wires svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.sb-internal-wires { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.sb-internal-wires svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
 .sb-route { transition: opacity 0.25s ease; }
 .sb-route.is-dim { opacity: 0.12; }
 .sb-wire { fill: none; stroke: var(--wire-idle); stroke-width: 1.5; stroke-linecap: round; }
@@ -897,8 +899,8 @@ body.sidebar-collapsed #btn-collapse-sidebar .lucide-icon {
 .sb-agent-count { flex: none; color: var(--ink-2); }
 .sb-agent-meta { min-width: 0; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 
-/* 02 线路交换台：状态 + 进行中数量 + 统一入口，下方是按入口协议分组的适配器 */
-.sb-core { position: relative; display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 12px; border: 1px solid var(--rule); border-radius: 16px; background: var(--sb-card); box-shadow: 0 1px 2px rgba(22, 27, 46, 0.05), 0 18px 40px -24px rgba(22, 27, 46, 0.35); }
+/* 02 线路交换台：统一入口 → 内部协议总线 → 统一出口 */
+.sb-core { position: relative; display: flex; flex-direction: column; padding: 14px 16px 12px; border: 1px solid var(--rule); border-radius: 16px; background: var(--sb-card); box-shadow: 0 1px 2px rgba(22, 27, 46, 0.05), 0 18px 40px -24px rgba(22, 27, 46, 0.35); }
 .sb-core-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .sb-health { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 12px; font-weight: 600; }
 .sb-lamp { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--rule-strong); }
@@ -915,17 +917,31 @@ body.sidebar-collapsed #btn-collapse-sidebar .lucide-icon {
 .switchboard.is-live .sb-level i:nth-child(2) { animation-delay: -0.4s; }
 .switchboard.is-live .sb-level i:nth-child(3) { animation-delay: -0.7s; }
 .switchboard.is-live .sb-level i:nth-child(4) { animation-delay: -0.15s; }
-.sb-core-reading { display: flex; align-items: baseline; gap: 8px; }
+.sb-core-reading { display: flex; align-items: baseline; gap: 8px; margin: 12px 0; }
 .sb-active { color: var(--ink); font: 600 32px/1 var(--font-display); font-variant-numeric: tabular-nums; }
 .sb-active.is-live { color: var(--lamp-ink); }
 .sb-active-label { color: var(--ink-3); font-size: 12px; }
-/* 统一入口横贯整张卡片，左右两端的接口就是交换台的总入口 / 总出口 */
-.sb-entry { position: relative; display: flex; align-items: center; gap: 10px; margin: 0 -16px; padding: 8px 16px; border-block: 1px solid var(--rule); background: var(--sb-inset); }
-.sb-entry-label { flex: none; padding: 1px 8px; border: 1px solid var(--rule); border-radius: 999px; background: var(--sb-card); color: var(--ink-2); font-size: 10.5px; font-weight: 600; }
-.sb-baseurl { min-width: 0; overflow-wrap: anywhere; color: var(--ink); font-size: 11.5px; }
-.sb-core-foot { color: var(--ink-3); font-size: 10.5px; text-align: center; }
+/* 对外端口只存在于 IN / OUT 横栏；横栏内侧锚点连接局部总线。 */
+.sb-gateway-io { position: relative; min-height: 42px; display: flex; align-items: center; gap: 9px; margin: 0 -16px; padding: 9px 16px; border-block: 1px solid var(--rule); background: var(--sb-inset); }
+.sb-exit { justify-content: flex-end; border-bottom: 0; }
+.sb-io-tag { flex: none; display: inline-grid; place-items: center; min-width: 30px; height: 20px; padding: 0 7px; border: 1px solid var(--rule-strong); border-radius: 999px; background: var(--sb-card); color: var(--ink-2); font-size: 9.5px; font-weight: 600; }
+.sb-io-copy { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.sb-io-copy strong { flex: none; color: var(--ink); font-size: 10.5px; font-weight: 650; }
+.sb-io-copy > span { min-width: 0; overflow: hidden; color: var(--ink-3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.sb-exit-copy { justify-content: flex-end; text-align: right; }
+.sb-io-copy > .sb-baseurl { color: var(--ink); font-size: 11px; }
+.sb-internal-anchor { position: absolute; z-index: 4; width: 10px; height: 10px; border: 2px solid var(--rule-strong); border-radius: 50%; background: var(--sb-card); box-shadow: 0 0 0 2px color-mix(in srgb, var(--sb-card) 85%, transparent); pointer-events: none; }
+.sb-internal-anchor::after { content: ""; position: absolute; inset: 2px; border-radius: inherit; background: var(--port-fill, var(--lamp)); }
+.sb-ingress-anchor { left: 17px; bottom: -5px; }
+.sb-egress-anchor { right: 17px; top: -5px; }
+.sb-internal-stage { position: relative; margin: 0 -2px; padding: 32px 42px 26px; background: linear-gradient(90deg, transparent 0 27px, color-mix(in srgb, var(--panel-3) 58%, transparent) 27px calc(100% - 27px), transparent calc(100% - 27px)); }
+.sb-rail-labels { position: absolute; inset: 9px 34px auto; z-index: 3; display: flex; justify-content: space-between; color: var(--ink-3); font-size: 8px; letter-spacing: 0.04em; pointer-events: none; }
+.sb-rail-labels span { display: inline-flex; align-items: center; gap: 5px; }
+.sb-rail-labels span::before { content: ""; width: 12px; height: 1px; background: var(--rule-strong); }
+.sb-rail-labels span:last-child::before { order: 2; }
+.sb-core-foot { margin-top: 10px; color: var(--ink-3); font-size: 10.5px; text-align: center; }
 
-.sb-adapters { list-style: none; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.sb-adapters { position: relative; z-index: 2; list-style: none; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .sb-adapters:empty { display: grid; place-items: center; min-height: 72px; padding: 10px 14px; border: 1px dashed var(--rule-strong); border-radius: 12px; color: var(--ink-3); font-size: 11.5px; text-align: center; }
 .sb-adapters:empty::before { content: attr(data-idle); }
 .switchboard.is-offline .sb-adapters:empty::before { content: "网关离线，暂无可用的协议转换"; }
@@ -2440,7 +2456,9 @@ body.is-booting .sb-active {
   /* 窄屏改为上下三段，连线与接口圆点隐藏，靠列表内的 Agent 圆点对应关系 */
   .switchboard { grid-template-columns: minmax(0, 1fr); grid-template-areas: "source" "core" "upstream" "empty" "legend"; row-gap: 18px; }
   .sb-core-panel { width: min(100%, 520px); justify-self: center; }
-  .sb-wires, .sb-port { display: none; }
+  .sb-wires, .sb-internal-wires, .sb-port, .sb-internal-anchor { display: none; }
+  .sb-internal-stage { padding: 14px 0; background: none; }
+  .sb-rail-labels { display: none; }
   .sb-agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
   .sb-legend-note { margin-left: 0; }
 }

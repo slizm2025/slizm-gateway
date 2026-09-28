@@ -320,13 +320,29 @@
               <strong id="sb-active" class="sb-active num-font">0</strong>
               <span class="sb-active-label">个请求进行中</span>
             </div>
-            <div class="sb-entry">
+            <div class="sb-gateway-io sb-entry">
               <span class="sb-port sb-port-in" id="sb-entry-port" aria-hidden="true"></span>
-              <span class="sb-entry-label">统一入口</span>
-              <span id="sb-baseurl" class="sb-baseurl num-font">-</span>
+              <span class="sb-io-tag num-font">IN</span>
+              <span class="sb-io-copy">
+                <strong>统一入口</strong>
+                <span id="sb-baseurl" class="sb-baseurl num-font">-</span>
+              </span>
+              <span class="sb-internal-anchor sb-ingress-anchor" id="sb-entry-anchor" aria-hidden="true"></span>
+            </div>
+            <div class="sb-internal-stage" id="sb-internal-stage">
+              <div class="sb-rail-labels" aria-hidden="true"><span>入口分配</span><span>出口汇聚</span></div>
+              <div class="sb-internal-wires" id="sb-internal-wires" aria-hidden="true"></div>
+              <ol class="sb-adapters" id="sb-adapters" aria-label="协议适配器与转换路径"></ol>
+            </div>
+            <div class="sb-gateway-io sb-exit">
+              <span class="sb-internal-anchor sb-egress-anchor" id="sb-exit-anchor" aria-hidden="true"></span>
+              <span class="sb-io-copy sb-exit-copy">
+                <strong>统一出口</strong>
+                <span class="num-font">路由完成 · 转发至健康上游</span>
+              </span>
+              <span class="sb-io-tag num-font">OUT</span>
               <span class="sb-port sb-port-out" id="sb-exit-port" aria-hidden="true"></span>
             </div>
-            <ol class="sb-adapters" id="sb-adapters" aria-label="协议适配器与转换路径"></ol>
             <p class="sb-core-foot">点击适配器，展开它支持的全部转换</p>
           </div>
         </section>

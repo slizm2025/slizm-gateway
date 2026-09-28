@@ -70,7 +70,8 @@
       openAdapters: new Set(),
       pathRows: new Map(),
       modelRows: new Map(),
-      wireCache: null
+      wireCache: null,
+      internalWireCache: null
     },
 
     // 请求日志状态
@@ -135,12 +136,15 @@
     sbCoreState: $("sb-core-state"),
     sbBaseUrl: $("sb-baseurl"),
     sbWires: $("sb-wires"),
+    sbInternalWires: $("sb-internal-wires"),
     sbLines: $("sb-lines"),
     sbAgents: $("sb-agents"),
     sbAdapters: $("sb-adapters"),
     sbAdapterCount: $("sb-adapter-count"),
     sbEntryPort: $("sb-entry-port"),
+    sbEntryAnchor: $("sb-entry-anchor"),
     sbExitPort: $("sb-exit-port"),
+    sbExitAnchor: $("sb-exit-anchor"),
     sbUpstreamToggle: $("sb-upstream-toggle"),
     sbEmptyText: $("sb-empty-text"),
     sbAgentCount: $("sb-agent-count"),
@@ -1597,28 +1601,35 @@
     return node;
   }
 
-  // 连线：Agent → 统一入口 → 实际转换路径 → 上游模型；内部弧线沿卡片左侧走线。
+  function linkSwitchboardEdge(edges, key, ends, agent, live) {
+    const edge = edges.get(key) || { key, ...ends, agents: [], live: [] };
+    if (!edge.agents.includes(agent)) edge.agents.push(agent);
+    if (live && !edge.live.includes(agent)) edge.live.push(agent);
+    edges.set(key, edge);
+  }
+
+  function sortSwitchboardEdges(edges) {
+    edges.forEach((edge) => {
+      edge.agents.sort();
+      edge.live.sort();
+    });
+    // 空闲线垫底，等待中的居中，有流量的画在最上层
+    const layer = (edge) => (edge.live.length ? 2 : edge.idle ? 0 : 1);
+    return edges.sort((a, b) => layer(a) - layer(b) || String(a.key || "").localeCompare(String(b.key || "")));
+  }
+
+  // 外部画布只表达网关边界：Agent → 统一 IN，统一 OUT → 上游模型。
   function switchboardEdges() {
     const sb = state.switchboard;
     const inbound = new Map();
-    const internal = new Map();
     const outbound = new Map();
     const agentRows = new Map(sb.agents.map((agent, index) => [agent.name, sb.agentRows[index]]));
-    const link = (edges, key, ends, agent, live) => {
-      const edge = edges.get(key) || { key, ...ends, agents: [], live: [] };
-      if (!edge.agents.includes(agent)) edge.agents.push(agent);
-      if (live && !edge.live.includes(agent)) edge.live.push(agent);
-      edges.set(key, edge);
-    };
     const add = (request, live) => {
       const agent = switchboardAgentLabel(request.clientType);
-      const pathKey = switchboardAdapterKey(request);
-      const path = sb.pathRows.get(pathKey);
       const agentRow = agentRows.get(agent);
       const model = sb.modelRows.get(JSON.stringify([String(request.provider || "unknown"), String(request.model || "unknown")]));
-      if (agentRow) link(inbound, "in " + agent, { from: agentRow.port, to: els.sbEntryPort }, agent, live);
-      if (path) link(internal, "adapter " + pathKey, { from: els.sbEntryPort, to: path.inPort, internal: true }, agent, live);
-      if (model) link(outbound, "out " + (path ? pathKey : "exit") + " " + model.key, { from: path ? path.outPort : els.sbExitPort, to: model.port }, agent, live);
+      if (agentRow) linkSwitchboardEdge(inbound, "in " + agent, { from: agentRow.port, to: els.sbEntryPort }, agent, live);
+      if (model) linkSwitchboardEdge(outbound, "out " + model.key, { from: els.sbExitPort, to: model.port }, agent, live);
     };
     sb.topology.forEach((request) => add(request, false));
     if (!sb.liveUnknown) sb.active.forEach((request) => add(request, true));
@@ -1626,41 +1637,89 @@
     sb.agents.forEach((agent) => {
       const row = agentRows.get(agent.name);
       if (row && ![...inbound.values()].some((edge) => edge.agents.includes(agent.name))) {
-        edges.push({ key: "idle " + agent.name, from: row.port, to: els.sbEntryPort, agents: [agent.name], live: [], idle: true });
+        edges.push({ key: "in idle " + agent.name, from: row.port, to: els.sbEntryPort, agents: [agent.name], live: [], idle: true });
       }
     });
     const linked = new Set([...outbound.values()].map((edge) => edge.to));
     sb.modelRows.forEach((row) => {
-      if (!linked.has(row.port)) edges.push({ key: "idle " + row.key, from: els.sbExitPort, to: row.port, agents: [], live: [], idle: true });
+      if (!linked.has(row.port)) edges.push({ key: "out idle " + row.key, from: els.sbExitPort, to: row.port, agents: [], live: [], idle: true });
     });
-    [...inbound.values(), ...internal.values(), ...outbound.values()].forEach((edge) => {
-      edge.agents.sort();
-      edge.live.sort();
-      edges.push(edge);
-    });
-    // 空闲线垫底，等待中的居中，有流量的画在最上层
-    const layer = (edge) => (edge.live.length ? 2 : edge.idle ? 0 : 1);
-    return edges.sort((a, b) => layer(a) - layer(b));
+    edges.push(...inbound.values(), ...outbound.values());
+    return sortSwitchboardEdges(edges);
   }
 
-  function drawSwitchboardWires() {
-    if (typeof document.createElementNS !== "function") return;
+  // 内部画布只表达协议处理：入口分配 → adapter path → 出口汇聚。
+  function switchboardInternalEdges() {
     const sb = state.switchboard;
-    const host = els.sbWires;
+    const ingress = new Map();
+    const egress = new Map();
+    const add = (request, live) => {
+      const agent = switchboardAgentLabel(request.clientType);
+      const pathKey = switchboardAdapterKey(request);
+      const path = sb.pathRows.get(pathKey);
+      if (!path) return;
+      linkSwitchboardEdge(ingress, "internal-in " + pathKey,
+        { from: els.sbEntryAnchor, to: path.inPort, side: "ingress", pathKey }, agent, live);
+      linkSwitchboardEdge(egress, "internal-out " + pathKey,
+        { from: path.outPort, to: els.sbExitAnchor, side: "egress", pathKey }, agent, live);
+    };
+    sb.topology.forEach((request) => add(request, false));
+    if (!sb.liveUnknown) sb.active.forEach((request) => add(request, true));
+    const paths = [...new Set([...ingress.values(), ...egress.values()].map((edge) => edge.pathKey))].sort();
+    const laneByPath = new Map(paths.map((key, index) => [key, index % 4]));
+    const edges = [...ingress.values(), ...egress.values()];
+    edges.forEach((edge) => { edge.lane = laneByPath.get(edge.pathKey) || 0; });
+    return sortSwitchboardEdges(edges);
+  }
+
+  function switchboardExternalPath(start, end) {
+    const bend = Math.max(24, Math.abs(end.x - start.x) * 0.45);
+    return "M " + start.x + " " + start.y + " C " + (start.x + bend) + " " + start.y + " " + (end.x - bend) + " " + end.y + " " + end.x + " " + end.y;
+  }
+
+  function switchboardIngressPath(start, end, lane) {
+    const railX = Math.min(end.x - 12, end.x - 24 + lane * 5);
+    const topY = start.y + 14;
+    const turnY = end.y - 8;
+    return "M " + start.x + " " + start.y
+      + " V " + (topY - 5)
+      + " Q " + start.x + " " + topY + " " + (start.x + 5) + " " + topY
+      + " H " + (railX - 5)
+      + " Q " + railX + " " + topY + " " + railX + " " + (topY + 5)
+      + " V " + turnY
+      + " Q " + railX + " " + end.y + " " + (railX + 8) + " " + end.y
+      + " H " + end.x;
+  }
+
+  function switchboardEgressPath(start, end, lane) {
+    const railX = Math.max(start.x + 12, start.x + 24 - lane * 5);
+    const bottomY = end.y - 14;
+    return "M " + start.x + " " + start.y
+      + " H " + (railX - 8)
+      + " Q " + railX + " " + start.y + " " + railX + " " + (start.y + 8)
+      + " V " + (bottomY - 5)
+      + " Q " + railX + " " + bottomY + " " + (railX + 5) + " " + bottomY
+      + " H " + (end.x - 5)
+      + " Q " + end.x + " " + bottomY + " " + end.x + " " + (bottomY + 5)
+      + " V " + end.y;
+  }
+
+  function drawSwitchboardWireLayer(host, edges, cacheName, pathForEdge) {
+    if (!host) return;
     const width = host.clientWidth;
     const height = host.clientHeight;
-    const edges = width && height ? switchboardEdges() : [];
-    if (!edges.length) {
+    const visibleEdges = width && height ? edges : [];
+    if (!visibleEdges.length) {
       host.replaceChildren();
-      sb.wireCache = null;
+      state.switchboard[cacheName] = null;
       return;
     }
-    const key = JSON.stringify(edges.map((edge) => [edge.key, edge.live]));
-    let cached = sb.wireCache;
+    const key = JSON.stringify(visibleEdges.map((edge) => [edge.key, edge.live]));
+    let cached = state.switchboard[cacheName];
     if (!cached || cached.key !== key || !host.contains(cached.svg)) {
       const svg = svgNode("svg", { focusable: "false" });
-      const refs = edges.map((edge) => {
-        const group = svgNode("g", {});
+      const refs = visibleEdges.map((edge) => {
+        const group = svgNode("g", { "data-edge-key": edge.key });
         const wire = svgNode("path", { class: "sb-wire" });
         group.appendChild(wire);
         // 同一条线上有多个 Agent 时，每个 Agent 的虚线错开一格，形成交替的多色段
@@ -1678,7 +1737,7 @@
         svg.appendChild(group);
         return { group, wire, flows };
       });
-      cached = sb.wireCache = { key, svg, refs };
+      cached = state.switchboard[cacheName] = { key, svg, refs };
       host.replaceChildren(svg);
     }
     cached.svg.setAttribute("viewBox", "0 0 " + width + " " + height);
@@ -1687,22 +1746,32 @@
       const rect = element?.getBoundingClientRect();
       return rect && (rect.width || rect.height) ? { x: rect.left + rect.width / 2 - origin.left, y: rect.top + rect.height / 2 - origin.top } : null;
     };
-    const focus = sb.selectedAgent;
-    edges.forEach((edge, index) => {
+    const focus = state.switchboard.selectedAgent;
+    visibleEdges.forEach((edge, index) => {
       const ref = cached.refs[index];
       const start = center(edge.from);
       const end = center(edge.to);
       ref.group.style.display = start && end ? "" : "none";
       if (!start || !end) return;
-      const bend = Math.max(24, Math.abs(end.x - start.x) * 0.45);
-      const d = edge.internal
-        ? "M " + start.x + " " + start.y + " C " + (Math.min(start.x, end.x) - 18) + " " + start.y + " " + (Math.min(start.x, end.x) - 18) + " " + end.y + " " + end.x + " " + end.y
-        : "M " + start.x + " " + start.y + " C " + (start.x + bend) + " " + start.y + " " + (end.x - bend) + " " + end.y + " " + end.x + " " + end.y;
+      const d = pathForEdge(edge, start, end);
       ref.wire.setAttribute("d", d);
       ref.flows.forEach((flow) => flow.setAttribute("d", d));
       const tone = edge.live.length ? " is-live" : edge.idle ? " is-idle" : " is-waiting";
       ref.group.setAttribute("class", "sb-route" + tone + (focus ? (edge.agents.includes(focus) ? " is-focus" : " is-dim") : ""));
     });
+  }
+
+  function drawSwitchboardWires() {
+    if (typeof document.createElementNS !== "function") return;
+    const liveAgents = state.switchboard.liveUnknown ? []
+      : [...new Set(state.switchboard.active.map((request) => switchboardAgentLabel(request.clientType)))].sort();
+    [els.sbEntryPort, els.sbExitPort, els.sbEntryAnchor, els.sbExitAnchor].forEach((port) => paintSwitchboardPort(port, liveAgents));
+    drawSwitchboardWireLayer(els.sbWires, switchboardEdges(), "wireCache",
+      (_edge, start, end) => switchboardExternalPath(start, end));
+    drawSwitchboardWireLayer(els.sbInternalWires, switchboardInternalEdges(), "internalWireCache",
+      (edge, start, end) => edge.side === "ingress"
+        ? switchboardIngressPath(start, end, edge.lane)
+        : switchboardEgressPath(start, end, edge.lane));
   }
 
   function renderOverview(data) {
@@ -2872,6 +2941,7 @@
   if (typeof ResizeObserver === "function") {
     const observer = new ResizeObserver(refreshLayout);
     observer.observe(els.sbWires);
+    observer.observe(els.sbInternalWires);
     observer.observe(els.trendCanvas);
   }
 

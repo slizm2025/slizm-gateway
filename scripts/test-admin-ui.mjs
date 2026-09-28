@@ -546,9 +546,18 @@ test('configured adapters retain DOM identity and order through idle, concurrent
   await refresh();
   nodes = [...host.children];
   assert.equal(nodes.length, 1);
-  const wires = get('sb-wires').children[0].children;
-  const shared = wires.filter((group) => group.children.length === 3);
-  assert.equal(shared.length, 2, 'entry-to-adapter and adapter-to-model share two Agent colors');
+  const outerWires = get('sb-wires').children[0].children;
+  const innerWires = get('sb-internal-wires').children[0].children;
+  const outerKeys = outerWires.map((group) => group.getAttribute('data-edge-key'));
+  assert.ok(outerKeys.filter((key) => key.startsWith('in ')).length >= 2, 'external canvas keeps one ingress per visible Agent');
+  assert.equal(outerKeys.filter((key) => key.startsWith('out ')).length, 1, 'same upstream model uses one aggregated gateway egress');
+  assert.ok(outerKeys.every((key) => /^(in|out) /.test(key)));
+  assert.ok(outerWires.every((group) => !group.getAttribute('data-edge-key').includes('internal')),
+    'external canvas must never connect adapter ports');
+  assert.equal(innerWires.length, 2, 'internal canvas owns entry-to-adapter and adapter-to-exit lines');
+  assert.ok(innerWires.every((group) => group.getAttribute('data-edge-key').startsWith('internal-')));
+  const shared = innerWires.filter((group) => group.children.length === 3);
+  assert.equal(shared.length, 2, 'both internal bus segments share two Agent colors');
   for (const group of shared) {
     assert.notEqual(group.children[1].style['--connection-color'], group.children[2].style['--connection-color']);
     assert.notEqual(group.children[1].style['--flow-from'], group.children[2].style['--flow-from']);
@@ -594,7 +603,8 @@ test('configured adapters retain DOM identity and order through idle, concurrent
   assert.doesNotMatch(model.className, /is-live/);
   assert.doesNotMatch(renderedText(model), /进行中/);
   assert.match(renderedText(model), /状态未知/);
-  assert.ok(get('sb-wires').children[0].children.every((group) => group.children.length === 1), 'unknown traffic must not animate');
+  assert.ok(get('sb-wires').children[0].children.every((group) => group.children.length === 1), 'unknown external traffic must not animate');
+  assert.ok(get('sb-internal-wires').children[0].children.every((group) => group.children.length === 1), 'unknown internal traffic must not animate');
 });
 
 test('live polling refreshes inflight rows and holds topology during a transient empty snapshot', async () => {
