@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>Claude Gateway 控制台</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="is-booting">
+  <!-- Lucide SVG Icons Sprite (ISC License: https://github.com/lucide-icons/lucide/blob/main/LICENSE) -->
+  <svg xmlns="http://www.w3.org/2000/svg" class="icon-sprite" aria-hidden="true">
+    <defs>
+      <!-- layout-dashboard -->
+      <g id="icon-dashboard">
+        <rect width="7" height="9" x="3" y="3" rx="1"/>
+        <rect width="7" height="5" x="14" y="3" rx="1"/>
+        <rect width="7" height="9" x="14" y="12" rx="1"/>
+        <rect width="7" height="5" x="3" y="16" rx="1"/>
+      </g>
+      <!-- file-text -->
+      <g id="icon-file-text">
+        <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>
+        <path d="M14 2v4a2 2 0 0 0 2 2h4"/>
+        <path d="M10 9H8"/>
+        <path d="M16 13H8"/>
+        <path d="M16 17H8"/>
+      </g>
+      <!-- settings -->
+      <g id="icon-settings">
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </g>
+      <!-- refresh-cw -->
+      <g id="icon-refresh">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+        <path d="M21 3v5h-5"/>
+        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+        <path d="M8 16H3v5"/>
+      </g>
+      <!-- download -->
+      <g id="icon-download">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" x2="12" y1="15" y2="3"/>
+      </g>
+      <!-- play -->
+      <g id="icon-play">
+        <polygon points="6 3 20 12 6 21 6 3"/>
+      </g>
+      <!-- pause -->
+      <g id="icon-pause">
+        <rect x="6" y="4" width="4" height="16" rx="1"/>
+        <rect x="14" y="4" width="4" height="16" rx="1"/>
+      </g>
+      <!-- save -->
+      <g id="icon-save">
+        <path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/>
+        <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/>
+        <path d="M7 3v4a1 1 0 0 0 1 1h7"/>
+      </g>
+      <!-- plus -->
+      <g id="icon-plus">
+        <path d="M5 12h14"/>
+        <path d="M12 5v14"/>
+      </g>
+      <!-- trash-2 -->
+      <g id="icon-trash">
+        <path d="M3 6h18"/>
+        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+        <line x1="10" x2="10" y1="11" y2="17"/>
+        <line x1="14" x2="14" y1="11" y2="17"/>
+      </g>
+      <!-- chart-no-axes-combined -->
+      <g id="icon-chart">
+        <path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-4 4"/>
+      </g>
+      <!-- x -->
+      <g id="icon-x">
+        <path d="M18 6 6 18"/>
+        <path d="m6 6 12 12"/>
+      </g>
+      <!-- sun -->
+      <g id="icon-sun">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v2"/><path d="M12 20v2"/>
+        <path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/>
+        <path d="M2 12h2"/><path d="M20 12h2"/>
+        <path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+      </g>
+      <!-- moon -->
+      <g id="icon-moon">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+      </g>
+      <!-- monitor -->
+      <g id="icon-monitor">
+        <rect width="20" height="14" x="2" y="3" rx="2"/>
+        <line x1="8" x2="16" y1="21" y2="21"/>
+        <line x1="12" x2="12" y1="17" y2="21"/>
+      </g>
+      <!-- panel-left -->
+      <g id="icon-panel-left">
+        <rect width="18" height="18" x="3" y="3" rx="2"/>
+        <path d="M9 3v18"/>
+      </g>
+      <!-- arrow-right -->
+      <g id="icon-arrow-right">
+        <path d="M5 12h14"/>
+        <path d="m12 5 7 7-7 7"/>
+      </g>
+      <!-- calendar -->
+      <g id="icon-calendar">
+        <path d="M8 2v4"/>
+        <path d="M16 2v4"/>
+        <rect width="18" height="18" x="3" y="4" rx="2"/>
+        <path d="M3 10h18"/>
+      </g>
+      <!-- undo-2 -->
+      <g id="icon-undo">
+        <path d="M9 14 4 9l5-5"/>
+        <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>
+      </g>
+    </defs>
+  </svg>
+
+  <aside class="app-sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><circle cx="7.5" cy="12" r="4.5"/><circle class="brand-mark-pin" cx="7.5" cy="12" r="1.6"/><path d="M12 12h3.5c2.5 0 3-4.5 5.5-4.5"/><path d="M15.5 12c2.5 0 3 4.5 5.5 4.5"/></svg>
+      </span>
+      <span class="brand-title">Claude Gateway<small>本地管理控制台</small></span>
+    </div>
+    <nav class="app-nav" aria-label="控制台主要导航">
+      <span class="nav-indicator" id="nav-indicator" aria-hidden="true"></span>
+      <span class="nav-caption">运行</span>
+      <button class="nav-tab active" data-view="overview" id="tab-overview" aria-current="page" title="运行概览">
+        <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-dashboard"/></svg>
+        <span class="nav-text">运行概览</span>
+      </button>
+      <button class="nav-tab" data-view="usage" id="tab-usage" title="用量分析">
+        <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-chart"/></svg>
+        <span class="nav-text">用量分析</span>
+      </button>
+      <span class="nav-caption">管理</span>
+      <button class="nav-tab" data-view="logs" id="tab-logs" title="请求日志">
+        <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-file-text"/></svg>
+        <span class="nav-text">请求日志</span>
+      </button>
+      <button class="nav-tab" data-view="settings" id="tab-settings" title="基础设置">
+        <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-settings"/></svg>
+        <span class="nav-text">基础设置</span>
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <span class="sidebar-host">本地网关 · <span class="num-font">127.0.0.1</span></span>
+      <button id="btn-collapse-sidebar" class="btn btn-ghost btn-icon" type="button" title="收起侧栏" aria-label="收起侧栏" aria-expanded="true">
+        <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-panel-left"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <div class="workspace">
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="header-title">网关状态</span>
+      <div id="gw-status-badge" class="badge badge-warning" title="管理页面登录状态">
+        <span class="badge-dot"></span>
+        <span class="badge-text">需要登录</span>
+      </div>
+      <div id="restart-badge" class="badge badge-warning hidden" title="配置已更新，需要重启网关后生效">
+        <span>需重启生效</span>
+      </div>
+    </div>
+    <div class="header-meta" id="header-meta">
+      <span class="meta-item"><span class="meta-label">PID</span> <span id="meta-pid" class="num-font">-</span></span>
+      <span class="meta-item"><span class="meta-label">运行时长</span> <span id="meta-uptime" class="num-font">-</span></span>
+      <span class="meta-item"><span class="meta-label">活动请求</span> <span id="meta-active" class="num-font">-</span></span>
+      <span class="meta-item"><span class="meta-label">基准地址</span> <span id="meta-baseurl" class="num-font">-</span></span>
+    </div>
+    <div class="header-actions">
+      <button id="btn-theme" class="btn btn-ghost" type="button" title="切换界面主题" aria-label="切换界面主题">
+        <svg class="lucide-icon" viewBox="0 0 24 24"><use id="icon-theme" href="#icon-sun"/></svg>
+        <span id="theme-text">浅色</span>
+      </button>
+      <button id="btn-open-restart" class="btn btn-secondary" title="重启本地网关服务" aria-label="重启本地网关服务">
+        <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-refresh"/></svg>
+        <span>重启网关</span>
+      </button>
+    </div>
+  </header>
+
+  <div id="auth-expired-banner" class="banner banner-danger hidden">
+    <div class="banner-content">
+      <strong>管理页面未登录或登录已过期</strong>：请在终端执行 <code class="num-font">node scripts/gw.js web</code> 重新打开控制台。
+    </div>
+  </div>
+
+  <main class="app-main">
+    <div id="overview-error-banner" class="banner banner-danger hidden">
+      <div id="overview-error-msg" class="banner-content"></div>
+    </div>
+    <div class="view-heading"><h1 id="current-view-title">运行概览</h1><span id="current-view-description">请求与消耗实时概况</span></div>
+    <!-- 概览与用量分析共用筛选条件 -->
+      <div id="overview-filters" class="toolbar">
+        <div class="toolbar-group time-filter">
+          <label class="toolbar-label">时间范围</label>
+          <div class="segmented-control" id="filter-period" role="radiogroup" aria-label="时间范围">
+            <button class="seg-btn" data-value="15m" role="radio" aria-checked="false" title="筛选最近15分钟用量">15分钟</button>
+            <button class="seg-btn" data-value="1h" role="radio" aria-checked="false" title="筛选最近1小时用量">1小时</button>
+            <button class="seg-btn" data-value="12h" role="radio" aria-checked="false" title="筛选最近12小时用量">12小时</button>
+            <button class="seg-btn active" data-value="today" role="radio" aria-checked="true" title="筛选今天用量">今天</button>
+            <button class="seg-btn" data-value="7d" role="radio" aria-checked="false" title="筛选最近7天用量">7天</button>
+            <button class="seg-btn" data-value="30d" role="radio" aria-checked="false" title="筛选最近30天用量">30天</button>
+            <button class="seg-btn" data-value="all" role="radio" aria-checked="false" title="查看所有历史用量">全部</button>
+          </div>
+          <div class="time-picker" id="time-picker">
+            <button id="btn-time-picker" class="btn btn-secondary btn-compact time-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="time-picker-panel" title="更多时间范围与自定义时段">
+              <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-calendar"/></svg>
+              <span id="time-picker-label">更多</span>
+            </button>
+            <div id="time-picker-panel" class="time-picker-panel hidden" role="dialog" aria-label="选择时间范围">
+              <div class="time-quick" id="time-quick">
+                <div class="time-quick-group">
+                  <span class="time-quick-title">分钟</span>
+                  <button type="button" data-value="5m">5 分钟</button>
+                  <button type="button" data-value="15m">15 分钟</button>
+                  <button type="button" data-value="30m">30 分钟</button>
+                </div>
+                <div class="time-quick-group">
+                  <span class="time-quick-title">小时</span>
+                  <button type="button" data-value="1h">1 小时</button>
+                  <button type="button" data-value="3h">3 小时</button>
+                  <button type="button" data-value="6h">6 小时</button>
+                  <button type="button" data-value="12h">12 小时</button>
+                  <button type="button" data-value="24h">24 小时</button>
+                </div>
+                <div class="time-quick-group">
+                  <span class="time-quick-title">天</span>
+                  <button type="button" data-value="today">今天</button>
+                  <button type="button" data-value="yesterday">昨天</button>
+                  <button type="button" data-value="3d">3 天</button>
+                  <button type="button" data-value="7d">7 天</button>
+                  <button type="button" data-value="14d">14 天</button>
+                  <button type="button" data-value="30d">30 天</button>
+                  <button type="button" data-value="90d">90 天</button>
+                  <button type="button" data-value="all">全部</button>
+                </div>
+              </div>
+              <div class="time-custom">
+                <span class="time-quick-title">自定义时段（精确到分钟）</span>
+                <label class="time-custom-field">开始
+                  <input type="datetime-local" id="range-since" class="form-input num-font" step="60">
+                </label>
+                <label class="time-custom-field">结束
+                  <input type="datetime-local" id="range-until" class="form-input num-font" step="60">
+                </label>
+                <p id="range-error" class="time-custom-error hidden" role="alert"></p>
+                <button id="btn-apply-range" class="btn btn-primary btn-compact" type="button">应用</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="toolbar-group">
+          <label for="filter-provider" class="toolbar-label">提供商</label>
+          <select id="filter-provider" class="form-select" title="按提供商筛选">
+            <option value="">全部提供商</option>
+          </select>
+        </div>
+
+        <div class="toolbar-group toolbar-right">
+          <span id="overview-updated-at" class="meta-label">更新于: -</span>
+          <span id="auto-refresh-state" class="meta-label auto-refresh-state" aria-live="polite"></span>
+          <button id="btn-auto-refresh" class="btn btn-icon" type="button" aria-pressed="true" title="暂停自动刷新" aria-label="暂停自动刷新">
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use id="icon-auto-refresh" href="#icon-pause"/></svg>
+          </button>
+          <button id="btn-refresh-overview" class="btn btn-icon" title="立即刷新概览数据" aria-label="立即刷新概览数据">
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-refresh"/></svg>
+          </button>
+        </div>
+      </div>
+
+    <!-- VIEW 1: 运行概览 (Overview) -->
+    <section id="view-overview" class="view-panel">
+      <!-- 交换台：Agent 请求源 -> 线路交换台（统一入口 + 协议适配器）-> 上游线路（真实模型） -->
+      <div class="switchboard" id="switchboard" aria-labelledby="switchboard-title">
+
+        <section class="sb-panel sb-agents-panel" aria-labelledby="sb-agents-title">
+          <div class="sb-panel-head">
+            <div class="sb-panel-title">
+              <span class="sb-step num-font" aria-hidden="true">01</span>
+              <div>
+                <span class="sb-kicker">INBOUND</span>
+                <h3 id="sb-agents-title">Agent 请求源</h3>
+              </div>
+            </div>
+            <span class="sb-panel-count num-font" id="sb-agent-count" title="Agent 数">0</span>
+          </div>
+          <ol class="sb-agents" id="sb-agents" aria-label="发起请求的 Agent"></ol>
+        </section>
+
+        <section class="sb-panel sb-core-panel" aria-labelledby="switchboard-title">
+          <div class="sb-panel-head">
+            <div class="sb-panel-title">
+              <span class="sb-step num-font" aria-hidden="true">02</span>
+              <div>
+                <span class="sb-kicker">GATEWAY</span>
+                <h2 class="sb-title" id="switchboard-title">线路交换台</h2>
+              </div>
+            </div>
+            <span class="sb-panel-count num-font" id="sb-adapter-count" title="使用中的协议适配器">0</span>
+          </div>
+          <div class="sb-core">
+            <div class="sb-core-head">
+              <span class="sb-health"><span class="sb-lamp" id="sb-core-lamp" aria-hidden="true"></span><span id="sb-core-state">等待网关状态</span></span>
+              <span class="sb-level" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+            </div>
+            <div class="sb-core-reading">
+              <strong id="sb-active" class="sb-active num-font">0</strong>
+              <span class="sb-active-label">个请求进行中</span>
+            </div>
+            <div class="sb-entry">
+              <span class="sb-port sb-port-in" id="sb-entry-port" aria-hidden="true"></span>
+              <span class="sb-entry-label">统一入口</span>
+              <span id="sb-baseurl" class="sb-baseurl num-font">-</span>
+              <span class="sb-port sb-port-out" id="sb-exit-port" aria-hidden="true"></span>
+            </div>
+            <ol class="sb-adapters" id="sb-adapters" aria-label="协议适配器与转换路径"></ol>
+            <p class="sb-core-foot">点击适配器，展开它支持的全部转换</p>
+          </div>
+        </section>
+
+        <section class="sb-panel sb-upstreams-panel" aria-labelledby="sb-upstreams-title">
+          <div class="sb-panel-head">
+            <div class="sb-panel-title">
+              <span class="sb-step num-font" aria-hidden="true">03</span>
+              <div>
+                <span class="sb-kicker">OUTBOUND</span>
+                <h3 id="sb-upstreams-title">上游线路</h3>
+              </div>
+            </div>
+            <div class="sb-panel-tools">
+              <button class="sb-panel-toggle" id="sb-upstream-toggle" type="button" aria-pressed="false" hidden>显示全部</button>
+              <span class="sb-panel-count num-font" id="sb-upstream-count" title="显示中的上游模型">0</span>
+            </div>
+          </div>
+          <ol class="sb-lines" id="sb-lines" aria-label="正在调用的上游模型"></ol>
+        </section>
+
+        <!-- 连线层：覆盖整个交换台，端点取自各卡片上的接口圆点 -->
+        <div class="sb-wires" id="sb-wires" aria-hidden="true"></div>
+
+        <div class="sb-empty hidden" id="sb-empty">
+          <span id="sb-empty-text">所选时段暂无请求</span>
+          <button class="btn btn-secondary" type="button" data-goto="settings">
+            <span>添加提供商</span>
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-arrow-right"/></svg>
+          </button>
+        </div>
+        <p class="sb-legend">
+          <span><i class="sb-legend-line" aria-hidden="true"></i>可用但无数据</span>
+          <span><i class="sb-legend-line sb-color-claude" aria-hidden="true"></i>claudecode</span>
+          <span><i class="sb-legend-line sb-color-codex" aria-hidden="true"></i>codex</span>
+          <span><i class="sb-legend-line sb-color-dsh" aria-hidden="true"></i>deepseek-harness</span>
+          <span class="sb-legend-tones"><i class="sb-tone-key is-good" aria-hidden="true"></i>好<i class="sb-tone-key is-fair" aria-hidden="true"></i>一般<i class="sb-tone-key is-poor" aria-hidden="true"></i>差</span>
+          <span class="sb-legend-note">实时状态 · 1 秒　指标 · 所选时段</span>
+        </p>
+      </div>
+      <!-- 核心指标 -->
+      <div class="metrics-grid">
+        <div class="metric-tile">
+          <div class="metric-label">请求数</div>
+          <div class="metric-value num-font" id="m-requests">0</div>
+          <div class="metric-sub">
+            <span class="text-danger" id="m-errors">0 错误</span> ·
+            <span class="text-muted" id="m-cancelled">0 取消</span>
+          </div>
+        </div>
+
+        <div class="metric-tile">
+          <div class="metric-label">费用（原价 USD）</div>
+          <div class="metric-value num-font" id="m-cost">$0.0000</div>
+          <div class="metric-sub" id="m-cost-sub">已计费: 0 / 未计价: 0</div>
+        </div>
+
+        <div class="metric-tile">
+          <div class="metric-label">Tokens</div>
+          <div class="metric-value num-font" id="m-tokens">0</div>
+          <div class="metric-sub">
+            入 <span id="m-input" class="num-font">0</span> / 出 <span id="m-output" class="num-font">0</span>
+          </div>
+        </div>
+
+        <div class="metric-tile">
+          <div class="metric-label">缓存读 / 写</div>
+          <div class="metric-value num-font" id="m-cache">0 / 0</div>
+          <div class="metric-sub" title="缓存读取 / (普通输入 + 缓存读取 + 缓存写入)">命中率 <span id="m-cache-hit" class="num-font">—</span> · 未上报 <span id="m-unreported" class="num-font">0</span></div>
+        </div>
+      </div>
+
+      <!-- 趋势图表区 (Canvas 自绘) -->
+      <div class="section-container">
+        <div class="section-header">
+          <div class="section-heading">
+            <h2 class="section-title">用量趋势</h2>
+            <span id="trend-range-label" class="section-sub num-font"></span>
+          </div>
+          <div class="section-tools">
+            <button id="btn-trend-zoom-out" class="btn btn-secondary btn-compact hidden" type="button" title="回到放大前的时间范围">
+              <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-undo"/></svg>
+              <span>返回上一范围</span>
+            </button>
+            <label class="toolbar-label" for="trend-step">粒度</label>
+            <select id="trend-step" class="form-select form-select-compact" title="趋势图每个点代表的时长">
+              <option value="auto">自动</option>
+              <option value="1m">1 分钟</option>
+              <option value="5m">5 分钟</option>
+              <option value="15m">15 分钟</option>
+              <option value="30m">30 分钟</option>
+              <option value="1h">1 小时</option>
+              <option value="1d">1 天</option>
+            </select>
+            <div class="segmented-control" id="trend-metric-toggle" role="radiogroup" aria-label="趋势图表指标切换">
+              <button class="seg-btn active" data-metric="tokens" role="radio" aria-checked="true" title="查看 Tokens 趋势">Tokens</button>
+              <button class="seg-btn" data-metric="cost" role="radio" aria-checked="false" title="查看原价与倍率后金额趋势">金额</button>
+            </div>
+          </div>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="trend-canvas" tabindex="0" aria-label="用量趋势图表，使用左右方向键查看数据点"></canvas>
+          <div id="trend-empty" class="empty-state hidden">暂无趋势数据</div>
+          <div id="trend-tooltip" class="trend-tooltip hidden" role="tooltip" aria-hidden="true">
+            <div id="trend-tooltip-time" class="trend-tooltip-time"></div>
+            <div id="trend-tooltip-value" class="trend-tooltip-value num-font"></div>
+            <div id="trend-tooltip-adjusted" class="trend-tooltip-adjusted num-font hidden"></div>
+            <div id="trend-tooltip-meta" class="trend-tooltip-meta num-font hidden"></div>
+            <ul id="trend-tooltip-models" class="trend-tooltip-models hidden"></ul>
+          </div>
+        </div>
+        <div class="trend-footer">
+          <div id="trend-legend" class="trend-legend hidden" role="group" aria-label="按模型细分：点击隐藏或显示，双击只看该模型"></div>
+          <span class="trend-hint">拖拽框选可放大时段 · 双击某点放大到该时段</span>
+        </div>
+        <details id="trend-data-details" class="chart-data-details">
+          <summary>查看趋势数据</summary>
+          <div class="chart-data-table-wrap">
+            <table class="data-table chart-data-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th id="trend-data-value-heading">Tokens</th>
+                  <th id="trend-data-adjusted-heading" class="hidden">倍率后 (USD)</th>
+                  <th>请求</th>
+                  <th title="缓存读取 / (普通输入 + 缓存读取 + 缓存写入)">缓存命中</th>
+                  <th>模型构成</th>
+                </tr>
+              </thead>
+              <tbody id="trend-data-body"></tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+
+      <!-- 进行中请求 (In-Flight) -->
+      <div class="section-container">
+        <div class="section-header">
+          <h2 class="section-title">进行中请求</h2>
+          <span class="badge badge-info" id="inflight-count">0</span>
+        </div>
+        <div class="table-scroll-wrap">
+          <table class="data-table" id="table-inflight">
+            <thead>
+              <tr>
+                <th>请求 ID</th>
+                <th>路由</th>
+                <th>提供商</th>
+                <th>模型</th>
+                <th>已耗时</th>
+                <th>预估输入 Tokens</th>
+                <th>输出 Tokens</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="7" class="text-center text-muted">无活动中的请求</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- VIEW 2: 用量分析 (Usage) -->
+    <section id="view-usage" class="view-panel hidden">
+      <!-- 提供商消费汇总 -->
+      <div class="section-container">
+        <div class="section-header">
+          <h2 class="section-title">提供商消费明细</h2>
+        </div>
+        <div class="table-scroll-wrap">
+          <table class="data-table" id="table-providers">
+            <thead>
+              <tr>
+                <th>提供商</th>
+                <th>请求数</th>
+                <th>错误数</th>
+                <th>输入 Tokens</th>
+                <th>输出 Tokens</th>
+                <th>缓存读 / 写</th>
+                <th title="缓存读取 / (普通输入 + 缓存读取 + 缓存写入)">缓存命中率</th>
+                <th>费用（原价 USD）</th>
+                <th>计费覆盖</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="9" class="text-center text-muted">暂无数据</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 模型消费明细 -->
+      <div class="section-container">
+        <div class="section-header">
+          <h2 class="section-title">模型消费明细</h2>
+        </div>
+        <div class="table-scroll-wrap">
+          <table class="data-table" id="table-models">
+            <thead>
+              <tr>
+                <th>模型名称</th>
+                <th>请求数</th>
+                <th>总 Tokens</th>
+                <th>输入 Tokens</th>
+                <th>输出 Tokens</th>
+                <th title="缓存读取 / (普通输入 + 缓存读取 + 缓存写入)">缓存命中率</th>
+                <th>费用（原价 USD）</th>
+                <th>计费覆盖</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="8" class="text-center text-muted">暂无数据</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 最近请求历史 -->
+      <div class="section-container">
+        <div class="section-header">
+          <h2 class="section-title">最近请求历史</h2>
+        </div>
+        <div class="table-scroll-wrap">
+          <table class="data-table" id="table-recent">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>请求 ID</th>
+                <th>路由 / 提供商</th>
+                <th>模型</th>
+                <th>状态</th>
+                <th>耗时</th>
+                <th>Tokens (入 / 出 / 缓存)</th>
+                <th>用量来源</th>
+                <th>费用（原价 USD）</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="9" class="text-center text-muted">暂无历史记录</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 3: 请求日志 (Logs) -->
+    <section id="view-logs" class="view-panel hidden">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <label class="toolbar-label">日志通道</label>
+          <div class="segmented-control" id="logs-source" role="radiogroup" aria-label="日志源通道">
+            <button class="seg-btn active" data-value="out" role="radio" aria-checked="true" title="标准输出">stdout 标准输出</button>
+            <button class="seg-btn" data-value="err" role="radio" aria-checked="false" title="错误输出">stderr 错误输出</button>
+          </div>
+        </div>
+
+        <div class="toolbar-group">
+          <label class="form-check-label form-switch" title="仅查看包含错误标志的日志">
+            <input type="checkbox" id="logs-errors-toggle" class="form-check-input" role="switch">
+            <span>仅看错误</span>
+          </label>
+        </div>
+
+        <div class="toolbar-group toolbar-grow">
+          <input type="search" id="logs-search" class="form-input" placeholder="按关键字过滤日志" aria-label="过滤日志">
+        </div>
+
+        <div class="toolbar-group toolbar-right">
+          <button id="btn-toggle-follow" class="btn btn-secondary is-following" title="切换自动滚动跟踪" aria-label="切换自动滚动跟踪">
+            <svg id="icon-follow-status" class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-pause"/></svg>
+            <span id="follow-text">跟踪中</span>
+          </button>
+          <button id="btn-download-logs" class="btn btn-secondary" title="下载当前可见日志文件" aria-label="下载当前日志文件">
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-download"/></svg>
+            <span>导出日志</span>
+          </button>
+          <button id="btn-refresh-logs" class="btn btn-icon" title="手动刷新日志" aria-label="手动刷新日志">
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-refresh"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="logs-container">
+        <div id="logs-truncated-warning" class="banner banner-warning hidden">
+          日志输出已被截断，当前仅展示最近 200 条。
+        </div>
+        <pre id="logs-terminal" class="terminal-body num-font" tabindex="0"></pre>
+      </div>
+    </section>
+
+    <!-- VIEW 4: 基础设置 (Settings) -->
+    <section id="view-settings" class="view-panel hidden">
+      <div id="settings-errors-banner" class="banner banner-danger hidden" role="alert">
+        <div id="settings-errors-list"></div>
+      </div>
+
+      <div id="settings-readonly">
+        <div class="settings-overview-head">
+          <div>
+            <div class="settings-kicker">当前配置</div>
+            <h2>网关配置</h2>
+            <p>当前已保存的提供商、路由及请求日志设置</p>
+          </div>
+          <button id="btn-edit-settings" class="btn btn-primary" type="button" title="修改网关配置">修改配置</button>
+        </div>
+        <div class="settings-summary" aria-label="配置摘要">
+          <div><span>上游站点</span><strong id="settings-provider-count" class="num-font">—</strong></div>
+          <div><span>路由规则</span><strong id="settings-route-count" class="num-font">—</strong></div>
+          <div><span>默认路由</span><strong id="settings-default-route" class="num-font">—</strong></div>
+          <div><span>请求详细日志</span><strong id="settings-log-requests">—</strong></div>
+        </div>
+        <div class="section-container settings-read-section">
+          <div class="section-header"><h3 class="section-title">上游提供商</h3>
+            <div class="section-tools"><button class="btn btn-secondary btn-compact" type="button" data-settings-open="provider:new"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加提供商</span></button></div>
+          </div>
+          <div id="settings-providers-readonly" class="settings-provider-list"></div>
+        </div>
+        <div class="section-container settings-read-section">
+          <div class="section-header"><h3 class="section-title">路由映射</h3>
+            <div class="section-tools"><button class="btn btn-secondary btn-compact" type="button" data-settings-open="route:new"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加路由</span></button></div>
+          </div>
+          <div class="table-scroll-wrap">
+            <table class="data-table settings-routes-table">
+              <thead><tr><th>路由别名</th><th>目标提供商</th><th>目标模型</th><th>客户端配置</th><th class="th-action">操作</th></tr></thead>
+              <tbody id="settings-routes-readonly"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="section-container settings-read-section">
+          <div class="section-header"><h3 class="section-title">模型价格（USD / 1M tokens）</h3>
+            <div class="section-tools"><button class="btn btn-secondary btn-compact" type="button" data-settings-open="pricing:new"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加模型</span></button></div>
+          </div>
+          <div class="table-scroll-wrap">
+            <table class="data-table settings-pricing-table">
+              <thead><tr><th>模型</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th class="th-action">操作</th></tr></thead>
+              <tbody id="settings-pricing-readonly"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div id="settings-editor" class="hidden">
+        <!-- 常驻操作栏：滚动到任何位置都能保存、跳转与搜索 -->
+        <div id="settings-editor-bar" class="settings-editor-bar">
+          <span class="settings-dirty"><i class="settings-dirty-dot" aria-hidden="true"></i><span id="settings-dirty-text">尚未修改</span></span>
+          <nav class="settings-jump" id="settings-jump" aria-label="跳转到配置分区">
+            <button type="button" data-jump="settings-section-general">通用</button>
+            <button type="button" data-jump="settings-section-providers">提供商 <span id="settings-jump-providers" class="num-font">0</span></button>
+            <button type="button" data-jump="settings-section-routes">路由 <span id="settings-jump-routes" class="num-font">0</span></button>
+            <button type="button" data-jump="settings-section-pricing">价格 <span id="settings-jump-pricing" class="num-font">0</span></button>
+          </nav>
+          <input id="settings-filter" type="search" class="form-input settings-filter" placeholder="搜索提供商 / 路由 / 模型" aria-label="搜索配置项" autocomplete="off">
+          <div class="settings-editor-actions">
+            <button id="btn-cancel-settings" class="btn btn-secondary" type="button">取消修改</button>
+            <button id="btn-save-settings" class="btn btn-primary" title="保存所有基础设置更改" aria-label="保存基础配置">
+              <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-save"/></svg>
+              <span>保存配置</span>
+            </button>
+          </div>
+        </div>
+        <!-- 全局通用设置 -->
+      <div class="section-container settings-section" id="settings-section-general">
+        <div class="section-header">
+          <h2 class="section-title">通用设置</h2>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-check-label form-switch" title="开启后网关将记录每个请求的详细入参和响应日志">
+              <input type="checkbox" id="setting-log-requests" class="form-check-input" role="switch">
+              <span>记录请求详细日志 (logRequests)</span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label for="setting-default-route" class="form-label">默认路由 (defaultRoute)</label>
+            <select id="setting-default-route" class="form-select" title="未匹配到别名时使用的默认路由规则">
+              <option value="">(无默认路由)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- 上游提供商 (Providers) -->
+      <div class="section-container settings-section" id="settings-section-providers">
+        <div class="section-header">
+          <h2 class="section-title">上游提供商</h2>
+          <div class="section-tools">
+            <button id="btn-expand-providers" class="btn btn-ghost btn-compact" type="button" title="展开全部提供商卡片">全部展开</button>
+            <button id="btn-collapse-providers" class="btn btn-ghost btn-compact" type="button" title="收起全部提供商卡片">全部收起</button>
+            <button id="btn-add-provider" class="btn btn-secondary" title="添加新的上游提供商" aria-label="添加新的上游提供商">
+              <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg>
+              <span>添加提供商</span>
+            </button>
+          </div>
+        </div>
+        <div id="providers-list" class="providers-accordion">
+          <!-- 动态渲染 -->
+        </div>
+        <button type="button" class="btn-add-inline" data-add="provider"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加提供商</span></button>
+      </div>
+
+      <!-- 路由映射规则 (Routes) -->
+      <div class="section-container settings-section" id="settings-section-routes">
+        <div class="section-header">
+          <h2 class="section-title">路由映射规则</h2>
+          <div class="section-tools">
+            <button id="btn-add-route" class="btn btn-secondary" title="添加新的路由映射规则" aria-label="添加新的路由规则">
+              <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg>
+              <span>添加路由</span>
+            </button>
+          </div>
+        </div>
+        <div class="table-scroll-wrap">
+          <table class="data-table" id="table-routes-edit">
+            <thead>
+              <tr>
+                <th>路由别名 (Alias)</th>
+                <th>目标提供商 (Provider)</th>
+                <th>目标模型 (Model)</th>
+                <th>客户端配置文件 (Profile)</th>
+                <th class="th-action">操作</th>
+              </tr>
+            </thead>
+            <tbody id="routes-tbody">
+              <!-- 动态添加行 -->
+            </tbody>
+          </table>
+        </div>
+        <button type="button" class="btn-add-inline" data-add="route"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加路由</span></button>
+      </div>
+
+      <!-- 模型价格 (Pricing)：全局原价，站点倍率在各提供商卡片内设置 -->
+      <div class="section-container settings-section" id="settings-section-pricing">
+        <div class="section-header">
+          <h2 class="section-title">模型价格（USD / 1M tokens）</h2>
+          <div class="section-tools">
+            <button id="btn-add-pricing" class="btn btn-secondary" type="button" title="添加模型价格" aria-label="添加模型价格">
+              <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg>
+              <span>添加模型</span>
+            </button>
+          </div>
+        </div>
+        <div class="table-scroll-wrap">
+          <table class="data-table" id="table-pricing-edit">
+            <thead>
+              <tr><th>模型 ID</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th class="th-action">操作</th></tr>
+            </thead>
+            <tbody id="pricing-tbody"></tbody>
+          </table>
+        </div>
+        <button type="button" class="btn-add-inline" data-add="pricing"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加模型</span></button>
+      </div>
+      </div>
+    </section>
+  </main>
+  </div>
+
+  <!-- 模态框: 确认重启网关 -->
+  <div id="modal-restart" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-restart-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-restart-title" class="modal-title">重启网关服务</h3>
+        <button id="modal-restart-close" class="btn btn-icon btn-ghost" title="关闭对话框" aria-label="关闭对话框">
+          <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p>确认要重启本地 Claude Gateway 吗？有进行中的请求时无法重启（接口会返回 409）。</p>
+        <div id="restart-error-msg" class="banner banner-danger mt-2 radius-4 hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancel-restart" class="btn btn-secondary">取消</button>
+        <button id="btn-confirm-restart" class="btn btn-danger">确认重启</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框: 未保存离开提示 -->
+  <div id="modal-unsaved" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-unsaved-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-unsaved-title" class="modal-title">未保存的配置更改</h3>
+        <button id="modal-unsaved-close" class="btn btn-icon btn-ghost" title="关闭对话框" aria-label="关闭对话框">
+          <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p id="unsaved-message">基础设置中有尚未保存的修改，切换视图将放弃这些修改。确定放弃并离开吗？</p>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-unsaved-stay" class="btn btn-secondary">留在设置</button>
+        <button id="btn-unsaved-discard" class="btn btn-danger">放弃更改并离开</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast 消息容器 -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
