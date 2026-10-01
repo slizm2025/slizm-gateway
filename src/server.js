@@ -1,5 +1,6 @@
 // Local Anthropic Messages gateway with provider routing and safe retries.
 import http from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -11,7 +12,7 @@ import * as gemini from './providers/gemini.js';
 import * as responses from './providers/responses.js';
 import * as messagesResponses from './providers/messages-to-responses.js';
 import { openAIToAnthropicStream, anthropicJsonToStream, convertJsonResponse, SSE_HEADERS } from './stream.js';
-import { withUpstream, gateStats, networkErrorCode, isSafeToRetryNetworkError, isRetryableStatus } from './limiter.js';
+import { withUpstream, gateStats, configureProviderLimits, networkErrorCode, isSafeToRetryNetworkError, isRetryableStatus } from './limiter.js';
 import { modelSeries, adaptBodyForModelSeries, adaptResponsesBodyForModelSeries } from './model-series.js';
 import { createRequestProfile, forwardEndToEndHeaders } from './providers/client-headers.js';
 import { replaceResponseModel } from './providers/response-body.js';
@@ -21,17 +22,30 @@ import { beginUsage, finishUsage, recordStreamUsage, estimateInputTokens, usageS
 
 const configPath = resolve(env('GATEWAY_CONFIG', join(ROOT, 'providers.json')));
 const initialContent = readFileSync(configPath, 'utf8');
-const cfg = loadConfig({ raw: JSON.parse(initialContent) });
+let cfg = loadConfig({ raw: JSON.parse(initialContent) });
+configureProviderLimits(cfg.providers);
+const configContext = new AsyncLocalStorage();
+const currentConfig = () => configContext.getStore()?.config ?? cfg;
+const capturePricing = (provider, model) => (configContext.getStore()?.capturePricing ?? runtimePricing.capture)(provider, model);
 const runtimePricing = createRuntimePricing({ configPath, initialContent,
-  onError: (error) => print(null, `计价热更新失败，保留原计价: ${redact(error.message)}`, console.error) });
+  prepareConfig: (raw) => {
+    const next = loadConfig({ raw });
+    return () => {
+      configureProviderLimits(next.providers);
+      cfg = next;
+    };
+  },
+  onError: (error) => print(null, `配置热更新失败，保留原配置: ${redact(error.message)}`, console.error) });
 const pricingControlToken = randomBytes(32).toString('hex');
 let stopPricingWatch;
 let removePricingControl;
 const startedAt = Date.now();
 const instanceId = randomUUID();
-let activeRequests = 0;
+// Restart protection spans HTTP handling, including uploads and token counting.
+let activeHttpRequests = 0;
 
 function resolveRoute(requestedModel) {
+  const cfg = currentConfig();
   const direct = cfg.routes.get(requestedModel);
   if (direct) {
     const provider = cfg.providers.get(direct.provider);
@@ -102,7 +116,7 @@ function print(requestId, message, write = console.log) {
   write(`[${stamp()}]${requestId ? ` [${requestId}]` : ''} ${redact(String(message)).replace(/\s*[\r\n]+\s*/g, ' ')}`);
 }
 function log(requestId, message) {
-  if (cfg.server.logRequests) print(requestId, message);
+  if (currentConfig().server.logRequests) print(requestId, message);
 }
 const CLIENT_BADGES = Object.freeze({
   codex: '◖⚆ᴥ⚆◗',
@@ -155,7 +169,7 @@ function validBody(body) {
   return body.messages.every((m) => m && ['user', 'assistant', 'system'].includes(m.role) && (typeof m.content === 'string' || (Array.isArray(m.content) && m.content.every((b) => b && typeof b === 'object' && !Array.isArray(b)))));
 }
 function checkClientAuth(req) {
-  const expected = Buffer.from(cfg.server.clientToken);
+  const expected = Buffer.from(currentConfig().server.clientToken);
   const auth = req.headers.authorization ?? '';
   const candidates = [auth.startsWith('Bearer ') ? auth.slice(7) : '', req.headers['x-api-key'] ?? ''];
   return candidates.some((value) => { const b = Buffer.from(String(value)); return b.length === expected.length && timingSafeEqual(b, expected); });
@@ -312,7 +326,7 @@ async function handleMessages(req, res, body, requestId, rawBody) {
   }
   const upstreamProtocol = provider.apiType === 'anthropic' ? 'messages' : responsesTransport ? 'responses' : 'chat-completions';
   const protocolAdapter = upstreamProtocol === 'messages' ? 'direct' : 'messages-to-' + upstreamProtocol;
-  const usage = beginUsage({ requestId, route: route.alias, provider: provider.name, model: upstreamModel, clientType: profile.clientType, inputProtocol: 'messages', upstreamProtocol, adapter: protocolAdapter, ...runtimePricing.capture(provider.name, upstreamModel), estimatedInputTokens: estimateInputTokens(body) });
+  const usage = beginUsage({ requestId, route: route.alias, provider: provider.name, model: upstreamModel, clientType: profile.clientType, inputProtocol: 'messages', upstreamProtocol, adapter: protocolAdapter, ...capturePricing(provider.name, upstreamModel), estimatedInputTokens: estimateInputTokens(body) });
   const requested = { ...body, model: upstreamModel };
   const outgoing = provider.apiType === 'anthropic' && modelSeries(upstreamModel) !== 'gemini'
     ? requested
@@ -466,7 +480,7 @@ async function handleResponses(req, res, body, requestId, rawBody) {
   }
   const upstreamProtocol = directResponses ? 'responses' : provider.apiType === 'anthropic' ? 'messages' : 'chat-completions';
   const protocolAdapter = directResponses ? 'direct' : 'responses-to-' + upstreamProtocol;
-  const usage = beginUsage({ requestId, route: route.alias, provider: provider.name, model: upstreamModel, clientType: profile.clientType, inputProtocol: 'responses', upstreamProtocol, adapter: protocolAdapter, ...runtimePricing.capture(provider.name, upstreamModel), estimatedInputTokens: directResponses ? Math.max(1, Math.ceil(rawBody.length / 4)) : estimateInputTokens(internalBody) });
+  const usage = beginUsage({ requestId, route: route.alias, provider: provider.name, model: upstreamModel, clientType: profile.clientType, inputProtocol: 'responses', upstreamProtocol, adapter: protocolAdapter, ...capturePricing(provider.name, upstreamModel), estimatedInputTokens: directResponses ? Math.max(1, Math.ceil(rawBody.length / 4)) : estimateInputTokens(internalBody) });
   const internalRequest = directResponses ? undefined : { ...internalBody, model: upstreamModel };
   const outgoing = directResponses
     ? adaptResponsesBodyForModelSeries(body, upstreamModel)
@@ -619,16 +633,17 @@ async function countTokens(req, res, body, rawBody) {
   return json(res, 200, { input_tokens: Math.max(1, Math.ceil(text.length / 4)) });
 }
 async function routeRequest(req, res) {
+  const cfg = currentConfig();
   const path = new URL(req.url, 'http://localhost').pathname.replace(/\/+$/, '') || '/';
   if (req.method === 'GET' && (path === '/health' || path === '/')) {
     return json(res, 200, {
-      status: 'ok', service: 'slizm-gateway', pid: process.pid, instanceId, startedAt: new Date(startedAt).toISOString(), pricingReload: true,
-      transport: 'node-http-connect-v2', uptimeSec: Math.round((Date.now() - startedAt) / 1000), activeRequests,
+      status: 'ok', service: 'slizm-gateway', pid: process.pid, instanceId, startedAt: new Date(startedAt).toISOString(), pricingReload: true, configReload: true,
+      transport: 'node-http-connect-v2', uptimeSec: Math.round((Date.now() - startedAt) / 1000), activeRequests: activeHttpRequests,
       routes: Object.fromEntries([...cfg.routes].map(([k, v]) => [k, `${v.provider}${v.model ? ` -> ${v.model}` : ''}`])),
       providers: [...cfg.providers.values()].map((p) => ({ name: p.name, apiType: p.apiType, baseUrl: p.baseUrl, key: p.apiKey ? '[已配置]' : '(未配置)' })),
     });
   }
-  if (req.method === 'POST' && path === '/v1/reload-pricing') {
+  if (req.method === 'POST' && ['/v1/reload-pricing', '/v1/reload-config'].includes(path)) {
     const remote = req.socket.remoteAddress;
     const supplied = Buffer.from(String(req.headers['x-gateway-pricing-token'] ?? ''));
     const expected = Buffer.from(pricingControlToken);
@@ -649,7 +664,7 @@ async function routeRequest(req, res) {
   if (!checkClientAuth(req)) return errorResponse(res, 401, '网关鉴权失败：客户端 token 不匹配', 'authentication_error');
   if (req.method === 'GET' && path === '/v1/pricing-status') return json(res, 200, { ...runtimePricing.status(), instanceId });
   if (req.method === 'GET' && path === '/v1/gate-stats') return json(res, 200, gateStats());
-  if (req.method === 'GET' && (path === '/v1/usage' || path === '/v1/token-stats')) return json(res, 200, usageStats({ activeRequests }));
+  if (req.method === 'GET' && (path === '/v1/usage' || path === '/v1/token-stats')) return json(res, 200, usageStats({ activeRequests: activeHttpRequests }));
   if (req.method === 'GET' && path === '/v1/models') {
     const data = [...cfg.routes].map(([alias, target]) => ({ id: alias, type: 'model', display_name: `${alias} (${target.provider}${target.model ? ` -> ${target.model}` : ''})`, created_at: new Date(startedAt).toISOString() }));
     return json(res, 200, { data, first_id: data[0]?.id ?? null, has_more: false, last_id: data.at(-1)?.id ?? null });
@@ -672,12 +687,12 @@ const server = http.createServer((req, res) => {
   const requestId = `gw_${randomUUID().slice(0, 8)}`;
   res.requestId = requestId;
   const tracked = req.method === 'POST';
-  if (tracked) activeRequests++;
-  routeRequest(req, res).catch((e) => {
+  if (tracked) activeHttpRequests++;
+  configContext.run({ config: cfg, capturePricing: runtimePricing.captureContext() }, () => routeRequest(req, res)).catch((e) => {
     console.error(`[${stamp()}] [${requestId}] 请求处理异常:`, redact(String(e?.stack ?? e)));
     errorResponse(res, 500, '网关内部错误，请查看已脱敏的服务日志', 'api_error', { 'x-should-retry': 'false' });
   }).finally(() => {
-    if (tracked) activeRequests--;
+    if (tracked) activeHttpRequests--;
     // 兜底：处理完响应仍未 end（例如错误处理本身又出错）就断开，不让 Claude Code 一直挂着等
     if (!res.writableEnded) res.destroy();
   });

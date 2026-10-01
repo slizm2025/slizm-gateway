@@ -16,11 +16,17 @@
     "selftest": "node scripts/gw.js test",
     "test": "node --test scripts/test-audit.mjs scripts/test-runtime.mjs scripts/test-reference.mjs scripts/test-hardening.mjs scripts/test-usage.mjs scripts/test-provider-report.mjs scripts/test-provider-pricing.mjs scripts/test-logging.mjs scripts/test-client-routing.mjs scripts/test-responses.mjs scripts/test-messages-to-responses.mjs scripts/test-response-body.mjs scripts/test-native-passthrough.mjs scripts/test-admin.mjs scripts/test-admin-ui.mjs scripts/test-switchboard-data.mjs && node scripts/test-limiter.mjs && node scripts/test-proxy-connect.mjs && node scripts/test-anthropic-compat.mjs && node scripts/test-codex-openai-adapter.mjs && node scripts/test-disconnect.mjs && node scripts/test-retry.mjs",
     "test:pricing-reload": "node --test scripts/test-runtime-pricing.mjs",
-    "pretest": "npm run test:pricing-reload",
+    "test:config-reload": "node --test scripts/test-runtime-config.mjs scripts/test-runtime-limits.mjs",
+    "test:subagents": "node --test scripts/test-subagents.mjs scripts/test-subagent-api.mjs scripts/test-admin-ui.mjs",
+    "pretest": "npm run test:pricing-reload && npm run test:config-reload && npm run test:subagents",
     "serve": "node src/server.js",
     "dev": "node --watch src/server.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "toml-eslint-parser": "1.0.3",
+    "yaml": "2.9.1"
   }
 }

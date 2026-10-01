@@ -27,7 +27,9 @@
     trendMetric: "tokens", // "tokens" | "cost"
     isGatewayOnline: false,
     activeRequestsCount: 0,
+    switchboardActiveCount: 0,
     isRestarting: false,
+    isClearingLogs: false,
     overviewReqSeq: 0,
     pollTimer: null,
     liveTimer: null,
@@ -57,6 +59,7 @@
       lines: [],
       active: [],
       topology: [],
+      retained: [],
       configured: [],
       agents: [],
       providers: [],
@@ -71,7 +74,11 @@
       pathRows: new Map(),
       modelRows: new Map(),
       wireCache: null,
-      internalWireCache: null
+      internalWireCache: null,
+      flowRequests: new Map(),
+      flowRefs: [],
+      flowFrame: null,
+      flowScope: null
     },
 
     // 请求日志状态
@@ -206,6 +213,7 @@
     followText: $("follow-text"),
     iconFollowStatus: $("icon-follow-status"),
     btnDownloadLogs: $("btn-download-logs"),
+    btnClearLogs: $("btn-clear-logs"),
     btnRefreshLogs: $("btn-refresh-logs"),
     logsTruncatedWarning: $("logs-truncated-warning"),
     logsTerminal: $("logs-terminal"),
@@ -243,7 +251,17 @@
     btnCollapseProviders: $("btn-collapse-providers"),
     settingsPricingReadonly: $("settings-pricing-readonly"),
 
+    viewSubagents: $("view-subagents"),
+
     // 模态框
+    modalClearLogs: $("modal-clear-logs"),
+    modalClearLogsClose: $("modal-clear-logs-close"),
+    clearLogsErrorMsg: $("clear-logs-error-msg"),
+    btnCancelClearLogs: $("btn-cancel-clear-logs"),
+    btnConfirmClearLogs: $("btn-confirm-clear-logs"),
+
+
+    // 模态框 (系统原有)
     modalRestart: $("modal-restart"),
     modalRestartClose: $("modal-restart-close"),
     btnCancelRestart: $("btn-cancel-restart"),
@@ -572,6 +590,7 @@
 
   function switchView(targetView) {
     if (state.activeView === targetView) return;
+    if (state.activeView === "subagents" && !window.Subagents?.leave()) return;
 
     if (state.activeView === "settings" && state.settings.isEditing && isSettingsDirty()) {
       state.pendingView = targetView;
@@ -595,7 +614,8 @@
       overview: ["运行概览", "请求与消耗实时概况"],
       usage: ["用量分析", "按提供商、模型与请求查看消耗"],
       logs: ["请求日志", "网关输出与错误追踪"],
-      settings: ["基础设置", "提供商与路由配置"]
+      settings: ["基础设置", "提供商与路由配置"],
+      subagents: ["子代理编排", "配置 Claude Code 与 Codex 的委托代理角色与模型路由"]
     };
     [els.currentViewTitle.textContent, els.currentViewDescription.textContent] = viewLabels[targetView];
     els.navTabs.forEach((tab) => {
@@ -610,6 +630,7 @@
     els.viewUsage.classList.toggle("hidden", targetView !== "usage");
     els.viewLogs.classList.toggle("hidden", targetView !== "logs");
     els.viewSettings.classList.toggle("hidden", targetView !== "settings");
+    if (els.viewSubagents) els.viewSubagents.classList.toggle("hidden", targetView !== "subagents");
 
     // 停止/启动对应轮询
     stopPolling();
@@ -626,6 +647,8 @@
       startLogsPolling();
     } else if (targetView === "settings") {
       fetchSettings();
+    } else if (targetView === "subagents") {
+      window.Subagents?.show();
     }
   }
 
@@ -639,6 +662,15 @@
     const raw = snapshot.sampledAt || snapshot.generatedAt;
     const t = raw ? Date.parse(raw) : 0;
     return Number.isFinite(t) ? t : 0;
+  }
+
+  function retainedFromSnapshot(data, online) {
+    if (online === false || !Array.isArray(data.switchboardRetained)) return [];
+    const sampledAt = getSnapshotTime(data);
+    return data.switchboardRetained.filter((item) => {
+      const finishedAt = Date.parse(item?.finishedAt);
+      return Number.isFinite(finishedAt) && (!sampledAt || sampledAt - finishedAt <= 300000);
+    });
   }
 
   // Both polling endpoints share one authoritative live sample and topology lease.
@@ -657,6 +689,7 @@
     const online = data.online ?? data.gateway?.online;
     const inflight = online === false ? [] : Array.isArray(data.switchboardActive) ? data.switchboardActive
       : (Array.isArray(data.inflight) ? data.inflight : []);
+    const retained = retainedFromSnapshot(data, online);
     const now = Date.now();
     if (online === false) clearLiveTopology();
     else if (inflight.length) {
@@ -667,13 +700,16 @@
     state.liveSnapshot = {
       sampledAt: data.sampledAt, generatedAt: data.generatedAt, instanceId, filter, online,
       activeRequests: data.activeRequests ?? data.gateway?.activeRequests ?? inflight.length,
+      switchboardActiveRequests: data.switchboardActiveRequests ?? inflight.length,
       inflight, switchboardActive: inflight, switchboardTopology: topology,
+      switchboardRetained: retained,
       switchboardConfigured: data.switchboardConfigured || [], liveUnknown: Boolean(data.liveUnknown),
     };
     return state.liveSnapshot;
   }
 
   function stopPolling() {
+    stopSwitchboardFlow();
     state.liveEpoch++;
     if (state.liveTimer) clearInterval(state.liveTimer);
     state.liveTimer = null;
@@ -712,6 +748,7 @@
       renderSwitchboard({ ...(state.overviewData || {}), ...live });
       renderInflight(live.inflight);
       state.activeRequestsCount = live.activeRequests;
+      state.switchboardActiveCount = live.switchboardActiveRequests;
       renderSwitchboardCore(live.online, { baseUrl: state.overviewData?.gateway?.baseUrl }, live.liveUnknown);
       updateRestartButtonState();
     } catch (error) {
@@ -786,7 +823,9 @@
       if (currentSeq !== state.overviewReqSeq) return;
       const live = acceptLiveSnapshot(data, state.providerFilter);
       data.switchboardActive = live.switchboardActive;
+      data.switchboardActiveRequests = live.switchboardActiveRequests;
       data.switchboardTopology = live.switchboardTopology;
+      data.switchboardRetained = live.switchboardRetained;
       data.switchboardConfigured = live.switchboardConfigured;
       data.inflight = live.inflight;
       data.liveUnknown = live.liveUnknown;
@@ -854,11 +893,12 @@
     responses: ["responses", "messages", "chat-completions"]
   };
   // 流动虚线：每个 Agent 占一格，多个 Agent 共用一条线时各色交替出现
-  const SB_FLOW_DASH = 7;
-  const SB_FLOW_STEP = 14;
+  const SB_FLOW_DASH = 10;
+  const SB_FLOW_STEP = 48;
+  const SB_FLOW_SPEED = 240;
 
   function renderSwitchboardCore(online, gwMeta = {}, unknown = false) {
-    const active = state.activeRequestsCount;
+    const active = state.switchboardActiveCount;
     setReading(els.sbActive, unknown ? "?" : online ? formatNumber(active) : "—");
     els.sbActive.classList.toggle("is-live", !unknown && online && active > 0);
     els.sbCoreLamp.className = "sb-lamp " + (unknown ? "" : !online ? "is-fault" : active > 0 ? "is-live" : "is-on");
@@ -908,13 +948,15 @@
     state.switchboard.liveUnknown = Boolean(data.liveUnknown);
     state.switchboard.active = Array.isArray(data.switchboardActive) ? data.switchboardActive : (Array.isArray(data.inflight) ? data.inflight : []);
     state.switchboard.topology = Array.isArray(data.switchboardTopology) ? data.switchboardTopology : state.switchboard.active;
+    state.switchboard.retained = Array.isArray(data.switchboardRetained) ? data.switchboardRetained : [];
     state.switchboard.configured = Array.isArray(data.switchboardConfigured) ? data.switchboardConfigured : [];
+    syncSwitchboardFlowRequests();
     const source = Array.isArray(data.switchboard) ? data.switchboard.map((row) => ({ ...row })) : null;
     const routeKey = (entry) => JSON.stringify([entry.clientType || "unknown", entry.provider, entry.model, entry.route || "", entry.inputProtocol || null, entry.upstreamProtocol || null, entry.adapter || null]);
     if (source) {
       const keys = new Set(source.map(routeKey));
-      const topology = state.switchboard.topology;
-      topology.forEach((entry) => {
+      const visibleTopology = [...state.switchboard.topology, ...state.switchboard.retained];
+      visibleTopology.forEach((entry) => {
         if (!keys.has(routeKey(entry))) { source.push({ ...entry, requests: 0 }); keys.add(routeKey(entry)); }
       });
     }
@@ -948,6 +990,9 @@
           baseCostUsd: item.baseCostUsd,
           live: state.switchboard.active.filter((entry) => routeKey(entry) === routeKey(item)).length,
           waiting: state.switchboard.topology.some((entry) => routeKey(entry) === routeKey(item)) && state.switchboard.active.every((entry) => routeKey(entry) !== routeKey(item)),
+          retained: state.switchboard.retained.some((entry) => routeKey(entry) === routeKey(item))
+            && state.switchboard.topology.every((entry) => routeKey(entry) !== routeKey(item))
+            && state.switchboard.active.every((entry) => routeKey(entry) !== routeKey(item)),
           avgDurationMs: item.avgDurationMs == null ? null : Number(item.avgDurationMs),
           share: totalRequests ? requests / totalRequests : 0
         };
@@ -1013,12 +1058,14 @@
 
     // 右侧按提供商归并：一张卡片列出该提供商被调用的模型，模型行上的圆点按发起的 Agent 着色
     const providers = new Map();
-    const emptyProvider = (name) => ({ name, requests: 0, live: 0, errors: 0, costUsd: null, baseCostUsd: null, durationMs: 0, timed: 0, routes: [], agents: [], protocols: new Set(), configuredProtocols: new Set() });
+    const emptyProvider = (name) => ({ name, requests: 0, live: 0, waiting: false, retained: false, errors: 0, costUsd: null, baseCostUsd: null, durationMs: 0, timed: 0, routes: [], agents: [], protocols: new Set(), configuredProtocols: new Set() });
     state.switchboard.lines.forEach((line) => {
       const key = line.provider || "unknown";
       const current = providers.get(key) || emptyProvider(key);
       current.requests += line.requests;
       current.live += line.live;
+      current.waiting ||= Boolean(line.waiting);
+      current.retained ||= Boolean(line.retained);
       current.errors += line.errors;
       if (line.costUsd != null) current.costUsd = (current.costUsd || 0) + (Number(line.costUsd) || 0);
       if ((line.baseCostUsd ?? line.costUsd) != null) current.baseCostUsd = (current.baseCostUsd || 0) + (Number(line.baseCostUsd ?? line.costUsd) || 0);
@@ -1035,7 +1082,7 @@
       if (!providers.has(route.provider)) providers.set(route.provider, emptyProvider(route.provider));
       const row = providers.get(route.provider);
       if (route.upstreamProtocol) row.configuredProtocols.add(route.upstreamProtocol);
-      if (!row.routes.some((r) => r.model === route.model)) row.routes.push({ model: route.model, clientType: 'unknown', requests: 0, live: 0, route: route.route, inputProtocol: route.inputProtocol, upstreamProtocol: route.upstreamProtocol, adapter: route.adapter });
+      if (!row.routes.some((r) => r.model === route.model)) row.routes.push({ model: route.model, clientType: 'unknown', requests: 0, live: 0, waiting: false, retained: false, route: route.route, inputProtocol: route.inputProtocol, upstreamProtocol: route.upstreamProtocol, adapter: route.adapter });
     });
     const providerTotal = [...providers.values()].reduce((sum, item) => sum + item.requests, 0);
     providers.forEach((provider) => {
@@ -1103,29 +1150,35 @@
       if (!groups.has(input)) groups.set(input, { key: input, paths: new Map(), active: [], agents: new Set() });
       const group = groups.get(input);
       const key = switchboardAdapterKey(entry);
-      if (!group.paths.has(key)) group.paths.set(key, { key, inputProtocol: input, upstreamProtocol: entry.upstreamProtocol, adapter: entry.adapter, routes: new Set(), active: [], agents: new Set(), used: false });
+      if (!group.paths.has(key)) group.paths.set(key, { key, inputProtocol: input, upstreamProtocol: entry.upstreamProtocol, adapter: entry.adapter, routes: new Set(), active: [], agents: new Set(), waiting: false, retained: false, configured: false });
       return group.paths.get(key);
     };
     Object.entries(SB_CONVERSIONS).forEach(([input, outputs]) => outputs.forEach((output) => {
       pathOf({ inputProtocol: input, upstreamProtocol: output, adapter: input === output ? "direct" : input + "-to-" + output });
     }));
     sb.configured.forEach((entry) => {
-      if (complete(entry)) pathOf(entry).routes.add((entry.route || "*") + " → " + entry.provider + " / " + (entry.model || "请求模型"));
+      if (complete(entry)) {
+        const path = pathOf(entry);
+        path.configured = true;
+        path.routes.add((entry.route || "*") + " → " + entry.provider + " / " + (entry.model || "请求模型"));
+      }
     });
-    const use = (entry, live) => {
+    const use = (entry, stateName) => {
       if (!complete(entry)) return;
       const agent = switchboardAgentLabel(entry.clientType);
       const path = pathOf(entry);
       const group = groups.get(entry.inputProtocol);
-      path.used = true;
       path.agents.add(agent);
       group.agents.add(agent);
-      if (!live) return;
-      path.active.push(entry);
-      group.active.push(entry);
+      if (stateName === "live") {
+        path.active.push(entry);
+        group.active.push(entry);
+      } else if (stateName === "waiting") path.waiting = true;
+      else if (stateName === "retained") path.retained = true;
     };
-    sb.topology.forEach((entry) => use(entry, false));
-    sb.active.forEach((entry) => use(entry, true));
+    sb.retained.forEach((entry) => use(entry, "retained"));
+    sb.topology.forEach((entry) => use(entry, "waiting"));
+    sb.active.forEach((entry) => use(entry, "live"));
     const order = Object.keys(SB_CONVERSIONS);
     const rank = (key) => (order.includes(key) ? order.indexOf(key) : order.length);
     return [...groups.values()].sort((a, b) => rank(a.key) - rank(b.key) || String(a.key).localeCompare(String(b.key)));
@@ -1136,8 +1189,8 @@
     if (!host) return;
     const sb = state.switchboard;
     const groups = switchboardAdapterGroups();
-    // 只列出正在使用的适配器；都空闲时由交换台里的待命提示占位
-    const entries = groups.filter((group) => [...group.paths.values()].some((path) => path.used));
+    const visible = (path) => path.active.length || path.waiting || path.retained;
+    const entries = groups.filter((group) => [...group.paths.values()].some((path) => visible(path) || (sb.showAllUpstreams && path.configured)));
     sb.adapterCache ||= new Map();
     const structure = JSON.stringify(entries.map((group) => [group.key, [...group.paths.keys()]]));
     if (sb.adapterStructure !== structure) {
@@ -1215,12 +1268,16 @@
     const sb = state.switchboard;
     const open = sb.openAdapters.has(row.key);
     const muted = sb.selectedAgent && !group.agents.has(sb.selectedAgent);
-    const className = "sb-adapter" + (!unknown && group.active.length ? " is-live" : "") + (open ? " is-open" : "") + (muted ? " is-muted" : "");
+    const paths = [...group.paths.values()];
+    const waiting = paths.some((path) => path.waiting && !path.active.length);
+    const retained = paths.some((path) => path.retained && !path.waiting && !path.active.length);
+    const configuredOnly = paths.some((path) => path.configured) && !group.active.length && !waiting && !retained;
+    const className = "sb-adapter" + (!unknown && group.active.length ? " is-live" : waiting ? " is-waiting" : retained ? " is-idle" : configuredOnly ? " is-configured-only" : "") + (open ? " is-open" : "") + (sb.showAllUpstreams ? " is-show-all" : "") + (muted ? " is-muted" : "");
     if (row.item.className !== className) row.item.className = className;
     row.head.setAttribute("aria-expanded", String(open));
     row.head.title = open ? "收起未使用的转换" : "展开全部 " + group.paths.size + " 种转换";
     const updateText = (element, value) => { if (element.textContent !== value) element.textContent = value; };
-    updateText(row.status, unknown ? "实时状态不可用" : group.active.length ? group.active.length + " 个请求进行中" : "等待后续请求");
+    updateText(row.status, unknown ? "实时状态不可用" : group.active.length ? group.active.length + " 个请求进行中" : waiting ? "等待下一步" : retained ? "没数据" : "未调用");
     let shown = 0;
     row.clients.forEach(({ agent, marker }) => {
       const count = group.active.filter((request) => {
@@ -1267,11 +1324,13 @@
     const focus = state.switchboard.selectedAgent;
     const live = !unknown && path.active.length > 0;
     const liveAgents = live ? [...new Set(path.active.map((request) => switchboardAgentLabel(request.clientType)))].sort() : [];
-    const muted = focus && path.used && !path.agents.has(focus);
-    row.item.className = "sb-path" + (live ? " is-live" : path.used ? " is-waiting" : " is-idle") + (muted ? " is-muted" : "");
+    const waiting = !live && path.waiting;
+    const retained = !live && !waiting && path.retained;
+    const muted = focus && (live || waiting || retained) && !path.agents.has(focus);
+    row.item.className = "sb-path" + (live ? " is-live" : waiting ? " is-waiting" : retained ? " is-idle" : " is-configured-only") + (muted ? " is-muted" : "");
     setSwitchboardDots(row, row.agents, [...path.agents].sort());
-    row.reading.textContent = !path.used ? (path.routes.size ? formatNumber(path.routes.size) + " 条路由" : "未配置")
-      : unknown ? "?" : live ? formatNumber(path.active.length) : "等待";
+    row.reading.textContent = unknown && (live || waiting) ? "?" : live ? formatNumber(path.active.length)
+      : waiting ? "等待" : retained ? "没数据" : path.routes.size ? formatNumber(path.routes.size) + " 条路由" : "未配置";
     const routes = [...path.routes].sort();
     row.item.title = switchboardProtocolLabel(path.inputProtocol) + " → " + switchboardProtocolLabel(path.upstreamProtocol)
       + (path.adapter === "direct" ? "（直通）" : "（" + path.adapter + "）")
@@ -1369,17 +1428,21 @@
     provider.routes.forEach((route) => {
       if (!route.model) return;
       if (!models.has(route.model)) {
-        models.set(route.model, { key: JSON.stringify([provider.name, route.model]), model: route.model, routes: new Set(), agents: new Set(), calling: new Set(), liveAgents: new Set(), requests: 0, errors: 0, live: 0, called: false, hit: [0, 0], ok: [0, 0] });
+        models.set(route.model, { key: JSON.stringify([provider.name, route.model]), model: route.model, routes: new Set(), agents: new Set(), calling: new Set(), retainedAgents: new Set(), liveAgents: new Set(), requests: 0, errors: 0, live: 0, called: false, retained: false, hit: [0, 0], ok: [0, 0] });
       }
       const model = models.get(route.model);
       const requests = Number(route.requests) || 0;
       const live = Number(route.live) || 0;
       const agent = route.clientType || "unknown";
       if (route.route) model.routes.add(route.route);
-      if (requests || live || route.waiting) model.agents.add(agent);
+      if (requests || live || route.waiting || route.retained) model.agents.add(agent);
       if (live || route.waiting) {
         model.calling.add(agent);
         model.called = true;
+      }
+      if (route.retained && !live && !route.waiting) {
+        model.retainedAgents.add(agent);
+        model.retained = true;
       }
       if (live) model.liveAgents.add(agent);
       model.requests += requests;
@@ -1390,7 +1453,7 @@
     });
     const sorted = (set) => [...set].sort();
     return [...models.values()]
-      .map((model) => ({ ...model, routes: sorted(model.routes), agents: sorted(model.agents), calling: sorted(model.calling), liveAgents: sorted(model.liveAgents) }))
+      .map((model) => ({ ...model, routes: sorted(model.routes), agents: sorted(model.agents), calling: sorted(model.calling), retainedAgents: sorted(model.retainedAgents), liveAgents: sorted(model.liveAgents) }))
       .sort((a, b) => a.model.localeCompare(b.model));
   }
 
@@ -1405,11 +1468,14 @@
     sb.providers.forEach((provider) => {
       const models = switchboardProviderModels(provider);
       const expanded = sb.showAllUpstreams || state.providerFilter === provider.name;
-      const shown = expanded ? models : models.filter((model) => model.called);
+      const shown = expanded ? models : models.filter((model) => model.called || model.retained);
       if (shown.length < models.length) hiddenAny = true;
       if (shown.length || expanded || provider.live > 0) cards.push({ provider, models: shown });
       else hiddenAny = true;
     });
+    if (!sb.showAllUpstreams && switchboardAdapterGroups().some((group) => [...group.paths.values()].some((path) => path.configured && !path.active.length && !path.waiting && !path.retained))) {
+      hiddenAny = true;
+    }
     // 卡片按提供商缓存复用，调用开始 / 结束时只增删卡片，不整棵重建
     sb.lineCache ||= new Map();
     const structure = JSON.stringify(cards.map(({ provider }) => provider.name));
@@ -1431,7 +1497,7 @@
     toggle.hidden = !sb.showAllUpstreams && !hiddenAny;
     toggle.textContent = sb.showAllUpstreams ? "只看调用中" : "显示全部";
     toggle.setAttribute("aria-pressed", String(sb.showAllUpstreams));
-    toggle.title = sb.showAllUpstreams ? "只显示正在被调用的上游模型" : "显示全部 " + formatNumber(sb.providers.length) + " 个上游提供商的模型";
+    toggle.title = sb.showAllUpstreams ? "只显示最近调用的上游与转换路径" : "显示全部已配置的上游与转换路径";
   }
 
   function createSwitchboardLine(provider) {
@@ -1476,9 +1542,11 @@
     const selectedAgent = sb.selectedAgent;
     const unknown = sb.liveUnknown;
     const live = unknown ? 0 : provider.live;
+    const waiting = !unknown && !live && provider.waiting;
+    const retained = !unknown && !live && !waiting && provider.retained;
     const related = !selectedAgent || provider.agents.includes(selectedAgent);
     const called = !unknown && (live > 0 || models.some((model) => model.called));
-    row.item.className = "sb-line " + (unknown ? "is-unknown " : "") + (provider.requests > 0 ? "is-used" : "is-idle") + (live > 0 ? " is-live" : "") + (called ? " is-called" : "") + (selectedAgent && related ? " is-target" : "") + (related ? "" : " is-muted");
+    row.item.className = "sb-line " + (unknown ? "is-unknown " : "") + (provider.requests > 0 ? "is-used" : "is-idle") + (live > 0 ? " is-live" : waiting ? " is-waiting" : retained ? " is-retained" : " is-configured-only") + (called ? " is-called" : "") + (selectedAgent && related ? " is-target" : "") + (related ? "" : " is-muted");
     const protocols = provider.protocols?.size ? provider.protocols : provider.configuredProtocols;
     row.note.textContent = [...(protocols || [])].map(switchboardProtocolLabel).join(" · ");
     setReading(row.share, switchboardShareText(provider));
@@ -1490,7 +1558,9 @@
     if (provider.errors > 0) parts.push([`${formatNumber(provider.errors)} 错误`, "sb-line-errors"]);
     if (unknown) parts.push(["状态未知", ""]);
     else if (live > 0) parts.push([`${formatNumber(live)} 进行中`, "sb-line-live"]);
-    if (!parts.length) parts.push(["待机", ""]);
+    else if (waiting) parts.push(["等待下一步", ""]);
+    else if (retained) parts.push(["没数据", ""]);
+    if (!parts.length) parts.push(["未调用", ""]);
     row.meta.replaceChildren(...parts.map(([text, className]) => {
       const span = document.createElement("span");
       span.className = className;
@@ -1571,14 +1641,14 @@
   // 模型行：真实模型名 + 调用它的 Agent 圆点；缓存命中、请求、成功率按好 / 一般 / 差着色
   function updateSwitchboardModel(row, model, maxRequests) {
     const focus = state.switchboard.selectedAgent;
-    const agents = model.called ? model.calling : model.agents;
+    const agents = model.called ? model.calling : model.retained ? model.retainedAgents : model.agents;
     const unknown = state.switchboard.liveUnknown;
     const live = unknown ? 0 : model.live;
     row.key = model.key;
-    row.item.className = "sb-model" + (unknown ? " is-unknown" : live > 0 ? " is-live" : model.called ? " is-waiting" : " is-idle") + (focus && !model.agents.includes(focus) ? " is-muted" : "");
+    row.item.className = "sb-model" + (unknown ? " is-unknown" : live > 0 ? " is-live" : model.called ? " is-waiting" : model.retained ? " is-idle" : " is-configured-only") + (focus && !model.agents.includes(focus) ? " is-muted" : "");
     if (row.name.textContent !== model.model) row.name.textContent = model.model;
     setSwitchboardDots(row, row.agents, agents);
-    row.reading.textContent = unknown ? "状态未知" : live > 0 ? formatNumber(live) + " 进行中" : model.called ? "等待下一步" : "";
+    row.reading.textContent = unknown ? "状态未知" : live > 0 ? formatNumber(live) + " 进行中" : model.called ? "等待下一步" : model.retained ? "没数据" : "未调用";
     row.item.title = (agents.length ? agents.join(", ") + " → " : "") + model.model + " · " + formatNumber(model.requests) + " 次"
       + (unknown ? " · 状态未知" : live > 0 ? " · " + formatNumber(live) + " 进行中" : "")
       + (model.routes.length ? "\n原始模型：" + model.routes.join(", ") : "");
@@ -1601,8 +1671,10 @@
     return node;
   }
 
-  function linkSwitchboardEdge(edges, key, ends, agent, live) {
-    const edge = edges.get(key) || { key, ...ends, agents: [], live: [] };
+  function linkSwitchboardEdge(edges, key, ends, agent, live, idle = false) {
+    const existing = edges.get(key);
+    const edge = existing || { key, ...ends, agents: [], live: [], idle: Boolean(idle) };
+    if (existing && !idle) edge.idle = false;
     if (!edge.agents.includes(agent)) edge.agents.push(agent);
     if (live && !edge.live.includes(agent)) edge.live.push(agent);
     edges.set(key, edge);
@@ -1624,13 +1696,14 @@
     const inbound = new Map();
     const outbound = new Map();
     const agentRows = new Map(sb.agents.map((agent, index) => [agent.name, sb.agentRows[index]]));
-    const add = (request, live) => {
+    const add = (request, live, idle = false) => {
       const agent = switchboardAgentLabel(request.clientType);
       const agentRow = agentRows.get(agent);
       const model = sb.modelRows.get(JSON.stringify([String(request.provider || "unknown"), String(request.model || "unknown")]));
-      if (agentRow) linkSwitchboardEdge(inbound, "in " + agent, { from: agentRow.port, to: els.sbEntryPort }, agent, live);
-      if (model) linkSwitchboardEdge(outbound, "out " + model.key, { from: els.sbExitPort, to: model.port }, agent, live);
+      if (agentRow) linkSwitchboardEdge(inbound, "in " + agent, { from: agentRow.port, to: els.sbEntryPort, stage: "source" }, agent, live, idle);
+      if (model) linkSwitchboardEdge(outbound, "out " + model.key, { from: els.sbExitPort, to: model.port, stage: "upstream" }, agent, live, idle);
     };
+    sb.retained.forEach((request) => add(request, false, true));
     sb.topology.forEach((request) => add(request, false));
     if (!sb.liveUnknown) sb.active.forEach((request) => add(request, true));
     const edges = [];
@@ -1653,16 +1726,17 @@
     const sb = state.switchboard;
     const ingress = new Map();
     const egress = new Map();
-    const add = (request, live) => {
+    const add = (request, live, idle = false) => {
       const agent = switchboardAgentLabel(request.clientType);
       const pathKey = switchboardAdapterKey(request);
       const path = sb.pathRows.get(pathKey);
       if (!path) return;
       linkSwitchboardEdge(ingress, "internal-in " + pathKey,
-        { from: els.sbEntryAnchor, to: path.inPort, side: "ingress", pathKey }, agent, live);
+        { from: els.sbEntryAnchor, to: path.inPort, side: "ingress", stage: "ingress", pathKey }, agent, live, idle);
       linkSwitchboardEdge(egress, "internal-out " + pathKey,
-        { from: path.outPort, to: els.sbExitAnchor, side: "egress", pathKey }, agent, live);
+        { from: path.outPort, to: els.sbExitAnchor, side: "egress", stage: "egress", pathKey }, agent, live, idle);
     };
+    sb.retained.forEach((request) => add(request, false, true));
     sb.topology.forEach((request) => add(request, false));
     if (!sb.liveUnknown) sb.active.forEach((request) => add(request, true));
     const paths = [...new Set([...ingress.values(), ...egress.values()].map((edge) => edge.pathKey))].sort();
@@ -1704,38 +1778,148 @@
       + " V " + end.y;
   }
 
+  function switchboardFlowNow() {
+    return typeof performance !== "undefined" ? performance.now() : Date.now();
+  }
+
+  function switchboardFlowKey(request, index) {
+    return JSON.stringify([request.requestId || index, request.clientType, request.provider,
+      request.model, request.route, request.inputProtocol, request.upstreamProtocol, request.adapter]);
+  }
+
+  function syncSwitchboardFlowRequests() {
+    const sb = state.switchboard;
+    const scope = JSON.stringify([state.providerFilter, state.liveInstanceId]);
+    if (sb.flowScope !== scope) {
+      sb.flowRequests.clear();
+      sb.flowScope = scope;
+    }
+    if (sb.liveUnknown) return;
+    const now = switchboardFlowNow();
+    const keys = new Set();
+    sb.active.forEach((request, index) => {
+      const key = switchboardFlowKey(request, index);
+      keys.add(key);
+      if (!sb.flowRequests.has(key)) sb.flowRequests.set(key, { startedAt: now });
+    });
+    for (const key of sb.flowRequests.keys()) if (!keys.has(key)) sb.flowRequests.delete(key);
+  }
+
+  function stopSwitchboardFlow() {
+    const sb = state.switchboard;
+    if (sb.flowFrame !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(sb.flowFrame);
+    sb.flowFrame = null;
+  }
+
+  // A finite dash train contains only packets already emitted at the source.
+  // The trailing gap is longer than the path, so SVG cannot repeat it ahead of the head.
+  function switchboardPacketDashes(tracks, length, now) {
+    const intervals = [];
+    tracks.forEach((track) => {
+      const head = Math.max(0, now - track.startedAt) * SB_FLOW_SPEED / 1000 - track.offset;
+      if (head <= 0) return;
+      const first = Math.max(0, Math.ceil((head - SB_FLOW_DASH - length) / SB_FLOW_STEP));
+      const last = Math.floor(head / SB_FLOW_STEP);
+      for (let packet = last; packet >= first; packet--) {
+        const end = Math.min(length, head - packet * SB_FLOW_STEP);
+        const start = Math.max(0, head - packet * SB_FLOW_STEP - SB_FLOW_DASH);
+        if (end > start) intervals.push([start, end]);
+      }
+    });
+    if (!intervals.length) return null;
+    intervals.sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    intervals.forEach(([start, end]) => {
+      const previous = merged[merged.length - 1];
+      if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
+      else merged.push([start, end]);
+    });
+    const dashes = [0];
+    let cursor = 0;
+    merged.forEach(([start, end]) => {
+      dashes.push(start - cursor, end - start);
+      cursor = end;
+    });
+    dashes.push(length + SB_FLOW_STEP);
+    return dashes.map((value) => value.toFixed(2)).join(" ");
+  }
+
+  function paintSwitchboardFlow() {
+    const sb = state.switchboard;
+    const animate = typeof requestAnimationFrame === "function" && !prefersReducedMotion();
+    const visible = state.activeView === "overview" && !document.hidden && !sb.liveUnknown;
+    const now = switchboardFlowNow();
+    let flowing = false;
+    sb.flowRefs.forEach((ref) => ref.flows.forEach((flow) => {
+      const live = visible && ref.visible && flow.tracks.length > 0;
+      const dashes = live ? (animate ? switchboardPacketDashes(flow.tracks, ref.length, now) : "none") : null;
+      flow.node.style.visibility = dashes ? "visible" : "hidden";
+      flow.node.style.setProperty("stroke-dasharray", dashes || "0 1000000");
+      if (live) flowing = true;
+    }));
+    return animate && flowing;
+  }
+
+  function animateSwitchboardFlow() {
+    state.switchboard.flowFrame = null;
+    if (paintSwitchboardFlow()) state.switchboard.flowFrame = requestAnimationFrame(animateSwitchboardFlow);
+  }
+
+  function connectSwitchboardFlowTracks(external, internal) {
+    const sb = state.switchboard;
+    sb.flowRefs = [...external, ...internal];
+    const refs = new Map(sb.flowRefs.map((ref) => [ref.key, ref]));
+    sb.flowRefs.forEach((ref) => ref.flows.forEach((flow) => { flow.tracks = []; }));
+    if (sb.liveUnknown) return;
+    sb.active.forEach((request, index) => {
+      const clock = sb.flowRequests.get(switchboardFlowKey(request, index));
+      if (!clock) return;
+      const agent = switchboardAgentLabel(request.clientType);
+      const path = switchboardAdapterKey(request);
+      const model = JSON.stringify([String(request.provider || "unknown"), String(request.model || "unknown")]);
+      const keys = ["in " + agent, "internal-in " + path, "internal-out " + path, "out " + model];
+      let offset = 0;
+      let previous;
+      keys.forEach((key) => {
+        const ref = refs.get(key);
+        if (!ref?.visible) return;
+        // Include travel across the gateway ports and the adapter card between SVG segments.
+        if (previous) offset += Math.hypot(ref.start.x - previous.end.x, ref.start.y - previous.end.y);
+        const flow = ref.flows.find((item) => item.agent === agent);
+        if (flow) flow.tracks.push({ startedAt: clock.startedAt, offset });
+        offset += ref.length;
+        previous = ref;
+      });
+    });
+  }
+
   function drawSwitchboardWireLayer(host, edges, cacheName, pathForEdge) {
-    if (!host) return;
+    if (!host) return [];
     const width = host.clientWidth;
     const height = host.clientHeight;
     const visibleEdges = width && height ? edges : [];
     if (!visibleEdges.length) {
       host.replaceChildren();
       state.switchboard[cacheName] = null;
-      return;
+      return [];
     }
     const key = JSON.stringify(visibleEdges.map((edge) => [edge.key, edge.live]));
     let cached = state.switchboard[cacheName];
     if (!cached || cached.key !== key || !host.contains(cached.svg)) {
       const svg = svgNode("svg", { focusable: "false" });
       const refs = visibleEdges.map((edge) => {
-        const group = svgNode("g", { "data-edge-key": edge.key });
+        const group = svgNode("g", { "data-edge-key": edge.key, "data-flow-stage": edge.stage || "idle" });
         const wire = svgNode("path", { class: "sb-wire" });
         group.appendChild(wire);
-        // 同一条线上有多个 Agent 时，每个 Agent 的虚线错开一格，形成交替的多色段
-        const period = SB_FLOW_STEP * edge.live.length;
-        const flows = edge.live.map((agent, index) => {
-          const flow = svgNode("path", { class: "sb-flow" + (agent === "codex" ? " is-light" : "") });
+        const flows = edge.live.map((agent) => {
+          const flow = svgNode("path", { class: "sb-flow" + (agent === "codex" ? " is-light" : ""), "data-flow-agent": agent, "stroke-dashoffset": 0 });
           flow.style.setProperty("--connection-color", switchboardAgentColor(agent));
-          flow.style.setProperty("--flow-from", -SB_FLOW_STEP * index + "px");
-          flow.style.setProperty("--flow-to", -(SB_FLOW_STEP * index + period) + "px");
-          flow.style.setProperty("stroke-dasharray", SB_FLOW_DASH + " " + (period - SB_FLOW_DASH));
-          flow.style.setProperty("animation-duration", (0.7 * edge.live.length).toFixed(1) + "s");
+          flow.style.visibility = "hidden";
           group.appendChild(flow);
-          return flow;
+          return { node: flow, agent, tracks: [] };
         });
         svg.appendChild(group);
-        return { group, wire, flows };
+        return { group, wire, flows, key: edge.key, visible: false };
       });
       cached = state.switchboard[cacheName] = { key, svg, refs };
       host.replaceChildren(svg);
@@ -1751,14 +1935,22 @@
       const ref = cached.refs[index];
       const start = center(edge.from);
       const end = center(edge.to);
+      ref.visible = Boolean(start && end);
       ref.group.style.display = start && end ? "" : "none";
       if (!start || !end) return;
       const d = pathForEdge(edge, start, end);
-      ref.wire.setAttribute("d", d);
-      ref.flows.forEach((flow) => flow.setAttribute("d", d));
+      ref.start = { x: start.x + origin.left, y: start.y + origin.top };
+      ref.end = { x: end.x + origin.left, y: end.y + origin.top };
+      if (ref.d !== d) {
+        ref.d = d;
+        ref.wire.setAttribute("d", d);
+        ref.flows.forEach((flow) => flow.node.setAttribute("d", d));
+        ref.length = ref.wire.getTotalLength?.() || Math.max(1, Math.hypot(end.x - start.x, end.y - start.y));
+      }
       const tone = edge.live.length ? " is-live" : edge.idle ? " is-idle" : " is-waiting";
       ref.group.setAttribute("class", "sb-route" + tone + (focus ? (edge.agents.includes(focus) ? " is-focus" : " is-dim") : ""));
     });
+    return cached.refs;
   }
 
   function drawSwitchboardWires() {
@@ -1766,15 +1958,20 @@
     const liveAgents = state.switchboard.liveUnknown ? []
       : [...new Set(state.switchboard.active.map((request) => switchboardAgentLabel(request.clientType)))].sort();
     [els.sbEntryPort, els.sbExitPort, els.sbEntryAnchor, els.sbExitAnchor].forEach((port) => paintSwitchboardPort(port, liveAgents));
-    drawSwitchboardWireLayer(els.sbWires, switchboardEdges(), "wireCache",
+    const external = drawSwitchboardWireLayer(els.sbWires, switchboardEdges(), "wireCache",
       (_edge, start, end) => switchboardExternalPath(start, end));
-    drawSwitchboardWireLayer(els.sbInternalWires, switchboardInternalEdges(), "internalWireCache",
+    const internal = drawSwitchboardWireLayer(els.sbInternalWires, switchboardInternalEdges(), "internalWireCache",
       (edge, start, end) => edge.side === "ingress"
         ? switchboardIngressPath(start, end, edge.lane)
         : switchboardEgressPath(start, end, edge.lane));
+    connectSwitchboardFlowTracks(external, internal);
+    stopSwitchboardFlow();
+    animateSwitchboardFlow();
   }
 
   function renderOverview(data) {
+    state.switchboardActiveCount = Number(data.switchboardActiveRequests ??
+      (Array.isArray(data.switchboardActive) ? data.switchboardActive.length : 0)) || 0;
     updateGatewayStatus(data.gateway?.online, data.gateway || {});
     if (data.liveUnknown && data.gateway?.online) renderSwitchboardCore(true, data.gateway, true);
 
@@ -2938,6 +3135,10 @@
   }
 
   window.addEventListener("resize", refreshLayout);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopSwitchboardFlow();
+    else if (state.activeView === "overview") drawSwitchboardWires();
+  });
   if (typeof ResizeObserver === "function") {
     const observer = new ResizeObserver(refreshLayout);
     observer.observe(els.sbWires);
@@ -3121,11 +3322,21 @@
       const details = document.createElement("details");
       details.className = "settings-provider";
       const summary = document.createElement("summary");
-      settingsText(summary, "strong", "settings-provider-name", provider.name || "未命名提供商");
-      settingsText(summary, "span", "settings-provider-protocol", (provider.apiType || "anthropic").toUpperCase());
-      settingsText(summary, "span", "settings-provider-url num-font", provider.baseUrl || "未设置地址");
-      summary.appendChild(settingsOpenButton("provider:" + index, "编辑", "直接修改提供商 " + (provider.name || "")));
+
+      const headLeft = document.createElement("div");
+      headLeft.className = "settings-provider-summary-left";
+      settingsText(headLeft, "strong", "settings-provider-name", provider.name || "未命名提供商");
+      settingsText(headLeft, "span", "settings-provider-protocol", (provider.apiType || "anthropic").toUpperCase());
+      summary.appendChild(headLeft);
+
+      const headRight = document.createElement("div");
+      headRight.className = "settings-provider-summary-right";
+      settingsText(headRight, "span", "settings-provider-url num-font", provider.baseUrl || "未设置地址");
+      headRight.appendChild(settingsOpenButton("provider:" + index, "编辑", "直接修改提供商 " + (provider.name || "")));
+      summary.appendChild(headRight);
+
       details.appendChild(summary);
+
       const body = document.createElement("div");
       body.className = "settings-provider-details";
       const fields = [
@@ -3215,6 +3426,42 @@
     state.settings.isEditing = false;
     renderSettingsMode();
     if (state.settings.draft) renderSettingsReadonly(state.settings.draft);
+  }
+
+
+  // --- 日志清理逻辑 ---
+  async function executeClearLogs() {
+    if (state.isClearingLogs) return;
+    state.isClearingLogs = true;
+    els.btnConfirmClearLogs.disabled = true;
+    els.btnConfirmClearLogs.textContent = "清空中...";
+    els.clearLogsErrorMsg.classList.add("hidden");
+
+    try {
+      const res = await fetch("/api/logs/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "清理日志失败 (" + res.status + ")");
+      }
+      els.modalClearLogs.classList.add("hidden");
+      let freedBytes = 0;
+      if (Array.isArray(data.cleared)) {
+        freedBytes = data.cleared.reduce((acc, f) => acc + (f.bytes || 0), 0);
+      }
+      const freedKb = (freedBytes / 1024).toFixed(1);
+      showToast("已清空请求日志，释放 " + freedKb + " KB 空间", "info");
+      await fetchLogs();
+    } catch (err) {
+      els.clearLogsErrorMsg.textContent = err.message;
+      els.clearLogsErrorMsg.classList.remove("hidden");
+    } finally {
+      state.isClearingLogs = false;
+      els.btnConfirmClearLogs.disabled = false;
+      els.btnConfirmClearLogs.textContent = "确认清空";
+    }
   }
 
   async function fetchSettings() {
@@ -3529,9 +3776,9 @@
   function renderDefaultRouteSelect(draft) {
     const currentVal = draft.defaultRoute || "";
     const opts = ['<option value="">(无默认路由)</option>'];
-    (draft.routes || []).forEach((r) => {
-      if (r.alias) {
-        opts.push(`<option value="${escapeHtml(r.alias)}">${escapeHtml(r.alias)}</option>`);
+    (draft.providers || []).forEach((provider) => {
+      if (provider.name) {
+        opts.push(`<option value="${escapeHtml(provider.name)}">${escapeHtml(provider.name)}</option>`);
       }
     });
     els.settingDefaultRoute.innerHTML = opts.join("");
@@ -3961,8 +4208,19 @@
       state.settings.serverRevision = updated.revision;
       state.settings.draft.revision = updated.revision;
       state.settings.initialDraftJson = JSON.stringify(state.settings.draft);
-      els.restartBadge.classList.remove("hidden");
-      showToast("设置已保存，需重启网关后生效", "success");
+
+      if (updated.reloadApplied === false) {
+        els.restartBadge.classList.remove("hidden");
+        const reason = updated.reloadError ? (": " + updated.reloadError) : "";
+        showToast("设置已保存，但尚未确认生效" + reason, "warning");
+      } else if (updated.reloadApplied === true && updated.restartRequired === true) {
+        els.restartBadge.classList.remove("hidden");
+        showToast("价格已生效，其他设置需重启", "info");
+      } else {
+        els.restartBadge.classList.add("hidden");
+        showToast("设置已保存并生效", "success");
+      }
+
       state.settings.isEditing = false;
       renderSettingsReadonly(state.settings.draft);
       renderSettingsMode();
@@ -4071,6 +4329,7 @@
     els.sbUpstreamToggle.addEventListener("click", () => {
       state.switchboard.showAllUpstreams = !state.switchboard.showAllUpstreams;
       renderSwitchboardLines();
+      renderSwitchboardAdapters(state.switchboard.liveUnknown);
       drawSwitchboardWires();
     });
 
@@ -4312,6 +4571,19 @@
       }
     });
 
+    els.btnClearLogs.addEventListener("click", () => {
+      els.clearLogsErrorMsg.classList.add("hidden");
+      els.modalClearLogs.classList.remove("hidden");
+      els.btnCancelClearLogs.focus();
+    });
+    els.modalClearLogsClose.addEventListener("click", () => {
+      els.modalClearLogs.classList.add("hidden");
+    });
+    els.btnCancelClearLogs.addEventListener("click", () => {
+      els.modalClearLogs.classList.add("hidden");
+    });
+    els.btnConfirmClearLogs.addEventListener("click", executeClearLogs);
+
     // 下载/导出日志
     els.btnDownloadLogs.addEventListener("click", () => {
       downloadVisibleLogs();
@@ -4464,6 +4736,7 @@
   async function boot() {
     await initAuth();
     initEvents();
+    window.Subagents?.init(apiFetch, showToast);
     // 默认进入运行概览并开启轮询
     applySwitchView("overview");
   }

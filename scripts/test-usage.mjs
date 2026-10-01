@@ -449,3 +449,67 @@ test('模型请求生命周期：逐阶段更新（开始->输入/上下文->输
   assert.equal(cancelRes.cacheReadTokens, 30);
   assert.equal(usageStats().inflight.some((r) => r.requestId === 'lifecycle-req-cancel'), false, '取消后从 inflight 集合移除');
 });
+
+test('交换台已结束拓扑：从 finish 精确保留 5 分钟，独立于 recent 且不泄露记账字段', () => {
+  const RealDate = globalThis.Date;
+  const previousUsageDir = process.env.GATEWAY_USAGE_DIR;
+  let now = RealDate.parse('2026-09-28T08:00:00.000Z');
+  class Clock extends RealDate {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
+  globalThis.Date = Clock;
+  process.env.GATEWAY_USAGE_DIR = 'off';
+  const path = (extra = {}) => ({
+    route: 'sticky-route', provider: 'sticky-provider', model: 'sticky-model', clientType: 'codex',
+    inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct', ...extra,
+  });
+  try {
+    const long = beginUsage({ requestId: 'sticky-long', ...path() });
+    now += 10 * 60 * 1000;
+    const longDone = finishUsage(long, { status: 502, error: 'secret error', usage: { input_tokens: 7 } });
+    let retained = usageStats().switchboardRetained.find((item) => item.route === 'sticky-route');
+    assert.equal(retained.finishedAt, longDone.time, '长请求从结束时刻而不是开始时刻起算');
+    assert.deepEqual(Object.keys(retained).sort(), [
+      'adapter', 'clientType', 'finishedAt', 'inputProtocol', 'model', 'provider', 'route', 'upstreamProtocol',
+    ]);
+    for (const forbidden of ['requestId', 'status', 'error', 'inputTokens', 'outputTokens', 'durationMs', 'usageSource']) {
+      assert.equal(Object.hasOwn(retained, forbidden), false, `sticky 元数据不得包含 ${forbidden}`);
+    }
+
+    now += 300000;
+    assert.ok(usageStats().switchboardRetained.some((item) => item.route === 'sticky-route'), '正好 300000ms 仍保留');
+    assert.equal(finishUsage(long, { status: 200 }), longDone, '重复 finish 返回原结果');
+    now += 1;
+    assert.equal(usageStats().switchboardRetained.some((item) => item.route === 'sticky-route'), false, '300001ms 才过期，重复 finish 不续期');
+
+    now += 1000;
+    const renewed = finishUsage(beginUsage({ requestId: 'sticky-renewed', ...path() }), { status: 200 });
+    retained = usageStats().switchboardRetained.find((item) => item.route === 'sticky-route');
+    assert.equal(retained.finishedAt, renewed.time, '同一路径再次完成会续期到最新 finish');
+
+    const short = finishUsage(beginUsage({ requestId: 'sticky-short', ...path({ route: 'short-route' }) }), { status: 200 });
+    assert.ok(usageStats().switchboardRetained.some((item) => item.finishedAt === short.time && item.route === 'short-route'), '未被轮询捕获的短请求也会保留');
+
+    for (let i = 0; i < 201; i++) {
+      finishUsage(beginUsage({ requestId: `flush-${i}`, ...path({ route: `flush-route-${i}` }) }), { status: 200 });
+    }
+    let stats = usageStats();
+    assert.equal(stats.recent.some((item) => item.requestId === 'sticky-short'), false, '短请求已被 MAX_RECENT 冲刷');
+    assert.ok(stats.switchboardRetained.some((item) => item.route === 'short-route'), 'sticky 缓存不依赖 MAX_RECENT');
+
+    const concurrentA = beginUsage({ requestId: 'concurrent-a', ...path({ route: 'concurrent-a', model: 'model-a' }) });
+    const concurrentB = beginUsage({ requestId: 'concurrent-b', ...path({ route: 'concurrent-b', model: 'model-b' }) });
+    finishUsage(concurrentA, { status: 200 });
+    finishUsage(concurrentB, { status: 200 });
+    stats = usageStats();
+    assert.ok(stats.switchboardRetained.some((item) => item.route === 'concurrent-a'));
+    assert.ok(stats.switchboardRetained.some((item) => item.route === 'concurrent-b'), '并发不同路径独立保留');
+  } finally {
+    now += 300001;
+    usageStats();
+    globalThis.Date = RealDate;
+    if (previousUsageDir === undefined) delete process.env.GATEWAY_USAGE_DIR;
+    else process.env.GATEWAY_USAGE_DIR = previousUsageDir;
+  }
+});

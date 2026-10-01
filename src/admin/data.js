@@ -448,13 +448,19 @@ export async function buildSwitchboardLive({ cfg, provider, getGateway }) {
   const gw = await fetchGatewayStatus(cfg, getGateway);
   const sampledAt = gw.stats?.generatedAt ?? new Date().toISOString();
   const switchboardActive = (gw.stats?.inflight ?? []).filter((item) => !provider || item.provider === provider);
+  const switchboardActiveRequests = switchboardActive.length;
+  const switchboardRetained = gw.online && Array.isArray(gw.stats?.switchboardRetained)
+    ? gw.stats.switchboardRetained.filter((item) => !provider || item.provider === provider)
+    : [];
   const res = {
     generatedAt: new Date().toISOString(),
     sampledAt,
     online: Boolean(gw.online),
     liveUnknown: !Array.isArray(gw.stats?.inflight),
     activeRequests: gw.stats?.activeRequests ?? gw.activeRequests ?? 0,
+    switchboardActiveRequests,
     switchboardActive,
+    switchboardRetained,
     switchboardConfigured: configuredSwitchboard(cfg, provider),
   };
   if (gw.instanceId) res.instanceId = gw.instanceId;
@@ -545,6 +551,10 @@ export async function buildOverview({
 
   const gw = await fetchGatewayStatus(cfg, getGateway);
   const inflight = (gw?.stats?.inflight ?? []).filter((r) => !provider || r.provider === provider);
+  const switchboardActiveRequests = inflight.length;
+  const switchboardRetained = gw.online && Array.isArray(gw?.stats?.switchboardRetained)
+    ? gw.stats.switchboardRetained.filter((item) => !provider || item.provider === provider)
+    : [];
   const switchboard = buildSwitchboardRows(filtered, inflight, provider);
   const switchboardConfigured = configuredSwitchboard(cfg, provider);
 
@@ -580,6 +590,8 @@ export async function buildOverview({
     inflight,
     switchboard,
     switchboardActive: inflight,
+    switchboardActiveRequests,
+    switchboardRetained,
     liveUnknown: !Array.isArray(gw.stats?.inflight),
     switchboardConfigured,
     providerNames: allProviderNames,

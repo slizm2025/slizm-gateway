@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { ROOT } from '../src/config.js';
 
 const script = readFileSync(join(ROOT, 'src', 'admin', 'public', 'app.js'), 'utf8');
+const subagentsScript = readFileSync(join(ROOT, 'src', 'admin', 'public', 'subagents.js'), 'utf8');
 
 function element() {
   const listeners = new Map();
@@ -15,6 +16,7 @@ function element() {
   return {
     listeners,
     calls,
+    dataset: {},
     children: [],
     get innerHTML() { return ''; },
     set innerHTML(value) { if (value === '') this.children = []; },
@@ -54,7 +56,15 @@ function element() {
     append(...children) { this.children.push(...children); },
     replaceChildren(...children) { this.children = children; },
     add() {},
-    setAttribute(name, value) { this[name] = value; },
+    setAttribute(name, value) {
+      this[name] = value;
+      if (name === 'class') this.className = value;
+      if (name.startsWith('data-')) {
+        const camel = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+        this.dataset[camel] = String(value);
+      }
+    },
+    getTotalLength() { return 100; },
     getAttribute(name) { return this[name] ?? null; },
     focus() { this.focused = true; },
     removeAttribute(name) { delete this[name]; },
@@ -85,7 +95,31 @@ function findContainerWithClass(node, className) {
   return null;
 }
 
-async function renderPage(response, clock = Date) {
+async function renderPage(response, clock = Date, options = {}) {
+  const enableRaf = Boolean(options.raf || options.manualRaf || options.animation || options.performance);
+  let perfTime = options.initialPerfTime || 0;
+  let nextRafId = 1;
+  const rafCallbacks = new Map();
+
+  const perfNow = options.perfNow || (() => perfTime);
+  const requestAnimationFrame = options.requestAnimationFrame || ((callback) => {
+    const id = nextRafId++;
+    rafCallbacks.set(id, callback);
+    return id;
+  });
+  const cancelAnimationFrame = options.cancelAnimationFrame || ((id) => {
+    rafCallbacks.delete(id);
+  });
+  const stepRaf = (advanceMs = 16.67) => {
+    perfTime += advanceMs;
+    const callbacks = [...rafCallbacks.entries()];
+    rafCallbacks.clear();
+    for (const [, cb] of callbacks) {
+      cb(perfTime);
+    }
+    return perfTime;
+  };
+  const windowListeners = new Map();
   const elements = new Map();
   const get = (id) => {
     if (!elements.has(id)) elements.set(id, element());
@@ -96,7 +130,7 @@ async function renderPage(response, clock = Date) {
     getElementById: get,
     querySelector: (selector) => get(selector),
     querySelectorAll: (selector) => selector === '.nav-tab'
-      ? ['overview', 'usage', 'logs', 'settings'].map((view) => {
+      ? ['overview', 'usage', 'logs', 'settings', 'subagents'].map((view) => {
         const tab = get('tab-' + view);
         tab.dataset = { view };
         return tab;
@@ -112,15 +146,32 @@ async function renderPage(response, clock = Date) {
   const intervals = [];
   const context = {
     Date: clock,
+    syncSwitchboardFlowRequests: () => {},
+    ...(enableRaf ? {
+      performance: { now: perfNow },
+      requestAnimationFrame,
+      cancelAnimationFrame,
+    } : {}),
     document,
     window: {
       location: { hash: '', pathname: '/', search: '' },
-      addEventListener() {},
+      addEventListener(name, callback) { windowListeners.set(name, callback); },
       devicePixelRatio: 1,
+      confirm: () => true,
+      matchMedia: (query) => ({
+        matches: query.includes('prefers-reduced-motion') ? Boolean(options.reducedMotion) : false,
+        addEventListener() {},
+        removeEventListener() {},
+      }),
       localStorage: {
         getItem: (key) => preferences.get(key) ?? null,
         setItem: (key, value) => preferences.set(key, value),
       },
+      ...(enableRaf ? {
+        performance: { now: perfNow },
+        requestAnimationFrame,
+        cancelAnimationFrame,
+      } : {}),
     },
     fetch: async (...args) => typeof response === 'function' ? response(...args) : response,
     URLSearchParams,
@@ -129,26 +180,40 @@ async function renderPage(response, clock = Date) {
     clearInterval() {},
     setTimeout() {},
   };
+  runInNewContext(subagentsScript, context, { filename: 'subagents.js' });
   runInNewContext(script, context, { filename: 'app.js' });
   await new Promise((resolve) => setImmediate(resolve));
   get.document = document;
   get.preferences = preferences;
   get.intervals = intervals;
+  get.rafCallbacks = rafCallbacks;
+  get.stepRaf = stepRaf;
+  get.getPerfTime = () => perfTime;
+  get.setPerfTime = (t) => { perfTime = t; };
+  get.windowListeners = windowListeners;
+  get.triggerResize = () => { windowListeners.get('resize')?.(); };
   return get;
 }
 
 test('overview renders online status and gates restart while requests are active', async () => {
   let activeRequests = 2;
+  const request = { requestId: 'req-overview', clientType: 'codex', provider: 'relay', model: 'actual', route: 'main', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct' };
   const get = await renderPage({
     ok: true,
     status: 200,
-    json: async () => ({
-      gateway: { online: true, pid: 1234, uptimeSec: 60, activeRequests },
-      total: {}, providerNames: [], trend: [], inflight: [], providers: [], models: [], recent: [],
-    }),
+    json: async () => {
+      const active = activeRequests ? [request] : [];
+      return {
+        gateway: { online: true, pid: 1234, uptimeSec: 60, activeRequests },
+        switchboardActiveRequests: active.length,
+        switchboardActive: active, switchboard: [],
+        total: {}, providerNames: [], trend: [], inflight: active, providers: [], models: [], recent: [],
+      };
+    },
   });
   assert.equal(get('gw-status-badge').querySelector('.badge-text').textContent, '网关运行中');
   assert.equal(get('meta-pid').textContent, 1234);
+  assert.equal(get('sb-active').textContent, '1');
   assert.equal(get('btn-open-restart').disabled, true);
   assert.match(get('btn-open-restart').title, /2 个在途请求/);
 
@@ -156,6 +221,7 @@ test('overview renders online status and gates restart while requests are active
   get('btn-refresh-overview').listeners.get('click')();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(get('btn-open-restart').disabled, false);
+  assert.equal(get('sb-active').textContent, '0');
 });
 
 test('an unauthenticated overview does not label the gateway offline', async () => {
@@ -560,7 +626,7 @@ test('configured adapters retain DOM identity and order through idle, concurrent
   assert.equal(shared.length, 2, 'both internal bus segments share two Agent colors');
   for (const group of shared) {
     assert.notEqual(group.children[1].style['--connection-color'], group.children[2].style['--connection-color']);
-    assert.notEqual(group.children[1].style['--flow-from'], group.children[2].style['--flow-from']);
+    assert.notEqual(group.children[1].getAttribute('data-flow-agent') || group.children[1].dataset?.flowAgent || group.children[1].style['--flow-from'], group.children[2].getAttribute('data-flow-agent') || group.children[2].dataset?.flowAgent || group.children[2].style['--flow-from']);
     assert.doesNotMatch(group.children[0].getAttribute('d'), /NaN|undefined/);
   }
   assert.equal(nodes[0].children[0].children[0].children[2].textContent, '2 个请求进行中');
@@ -568,7 +634,7 @@ test('configured adapters retain DOM identity and order through idle, concurrent
   assert.equal(disclosure.getAttribute('aria-expanded'), 'false');
   const paths = findByClass(nodes[0], 'sb-paths').children;
   assert.equal(paths.length, 3, 'Messages supports three output protocols');
-  assert.equal(paths.filter((path) => path.className.includes('is-idle')).length, 2);
+  assert.equal(paths.filter((path) => path.className.includes('is-configured-only')).length, 2);
   disclosure.listeners.get('click')();
   assert.equal(disclosure.getAttribute('aria-expanded'), 'true');
   assert.match(nodes[0].className, /is-open/);
@@ -674,6 +740,56 @@ test('waiting topology survives empty polls without counting traffic and expires
   now += 6000;
   await poll();
   assert.equal(get('sb-adapters').children.length, 0, 'empty polls must not renew the hold');
+});
+
+test('retained topology becomes static idle after 5s, expires after 5 minutes, and show-all reveals configured-only rows', async () => {
+  const base = Date.parse('2026-09-28T06:00:00.000Z');
+  let browserNow = base;
+  let sampledAt = base;
+  class Clock extends Date { static now() { return browserNow; } }
+  const request = { requestId: 'sticky-live', route: 'original', provider: 'relay', model: 'actual',
+    clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct', elapsedMs: 1000 };
+  const otherPath = { ...request, requestId: 'other-live', route: 'other', model: 'other-model', inputProtocol: 'messages', upstreamProtocol: 'responses', adapter: 'messages-to-responses' };
+  const configured = [{ ...request }, { ...otherPath }];
+  let active = [request];
+  let retained = [];
+  const get = await renderPage(async () => ({ ok: true, status: 200, json: async () => ({
+    sampledAt: new Date(sampledAt).toISOString(), generatedAt: new Date(sampledAt).toISOString(),
+    online: true, activeRequests: active.length, gateway: { online: true, activeRequests: active.length },
+    total: {}, providers: [], providerNames: ['relay'], models: [], recent: [], trend: [], switchboard: [],
+    inflight: active, switchboardActive: active, switchboardRetained: retained, switchboardConfigured: configured,
+  }) }), Clock);
+  const poll = get.intervals.at(-1);
+  const adapterHost = get('sb-adapters');
+  const lineHost = get('sb-lines');
+  const liveAdapter = adapterHost.children[0];
+  assert.match(liveAdapter.className, /is-live/);
+
+  active = [];
+  sampledAt += 1000;
+  browserNow += 1000;
+  const firstFinishedAt = new Date(sampledAt).toISOString();
+  retained = [{ ...request, finishedAt: firstFinishedAt }];
+  await poll();
+  assert.equal(adapterHost.children[0], liveAdapter);
+  assert.match(findByClass(liveAdapter, 'sb-path').className, /is-waiting/, '前 5 秒仍由原拓扑租约表达等待态');
+
+  sampledAt += 5000;
+  browserNow += 5000;
+  await poll();
+  assert.equal(adapterHost.children[0], liveAdapter);
+  assert.match(findByClass(liveAdapter, 'sb-path').className, /is-idle/, '超过 5 秒变为静态空闲态');
+  assert.match(lineHost.children[0].className, /is-retained/, '提供商线标记为 retained 态');
+
+  sampledAt += 300000;
+  browserNow += 300000;
+  retained = [];
+  await poll();
+  assert.equal(adapterHost.children.length, 0, '超过 5 分钟且无流量后过期移除');
+
+  get('sb-upstream-toggle').listeners.get('click')();
+  assert.equal(adapterHost.children.length, 2, '开启全部后展示配置的全部 adapter');
+  assert.ok(adapterHost.children.every((child) => child.className.includes('is-configured-only')));
 });
 
 test('request elapsed display is monotonic for one ID but starts fresh for the next step', async () => {
@@ -874,6 +990,8 @@ test('settings are read-only by default, edit only on demand, cancel dirty chang
       if (url === '/api/settings' && options.method === 'PUT') {
         puts++;
         Object.assign(settings, JSON.parse(options.body), { revision: settings.revision + 1 });
+
+
         return { revision: settings.revision };
       }
       return url === '/api/settings' ? settings :
@@ -927,6 +1045,50 @@ test('settings are read-only by default, edit only on demand, cancel dirty chang
   assert.equal(puts, 1);
   assert.equal(get('settings-editor').classList.contains('hidden'), true);
   assert.equal(get('settings-log-requests').textContent, '已开启');
+});
+
+test('settings save feedback distinguishes unconfirmed reload and legacy partial reload', async () => {
+  let reloadApplied = false;
+  let restartRequired = false;
+  let reloadError = 'daemon busy';
+  const settings = {
+    revision: 1, logRequests: false, defaultRoute: 'main',
+    providers: [{ name: 'p1', apiType: 'openai', baseUrl: 'http://localhost', hasApiKey: true }],
+    routes: [{ alias: 'main', provider: 'p1', model: 'm1', clientProfile: 'auto' }],
+  };
+  const get = await renderPage(async (url, options = {}) => {
+    if (url === '/api/settings' && options.method === 'PUT') {
+      return { ok: true, status: 200, json: async () => ({ revision: 2, reloadApplied, restartRequired, reloadError }) };
+    }
+    return { ok: true, status: 200, json: async () => url === '/api/settings' ? settings : ({ gateway: { online: true }, total: {}, providerNames: [], trend: [], inflight: [], providers: [], models: [], recent: [] }) };
+  });
+
+  get('tab-settings').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  get('btn-edit-settings').listeners.get('click')();
+  get('settings-editor').listeners.get('input')();
+  get('btn-save-settings').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('restart-badge').classList.contains('hidden'), false);
+
+  reloadApplied = true;
+  restartRequired = true;
+  get('btn-edit-settings').listeners.get('click')();
+  get('settings-editor').listeners.get('input')();
+  get('btn-save-settings').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('restart-badge').classList.contains('hidden'), false);
+
+  reloadApplied = true;
+  restartRequired = false;
+  get('btn-edit-settings').listeners.get('click')();
+  get('settings-editor').listeners.get('input')();
+  get('btn-save-settings').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('restart-badge').classList.contains('hidden'), true);
 });
 
 test('expanded cost details survive refresh and auto-refresh can be paused', async () => {
@@ -1036,4 +1198,558 @@ test('settings items can be edited or added in place and the editor jumps to the
   assert.ok(body, '保存时提交了设置');
   assert.deepEqual(body.routes.map((route) => route.alias), ['main', 'fast', 'new-alias']);
   assert.ok(body.providers.every((provider) => Object.keys(provider).every((key) => !key.startsWith('_'))));
+});
+
+
+test('clear logs button confirms then POSTs /api/logs/clear and refreshes', async () => {
+  let cleared = false;
+  let fetchedLogs = false;
+  const get = await renderPage(async (url, options = {}) => {
+    if (url === '/api/logs/clear' && options.method === 'POST') {
+      cleared = true;
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: [{ bytes: 2048 }] }) };
+    }
+    if (String(url).startsWith('/api/logs')) {
+      fetchedLogs = true;
+      return { ok: true, status: 200, json: async () => ({ lines: [], truncated: false }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ gateway: { online: true }, total: {}, providerNames: [], trend: [], inflight: [], providers: [], models: [], recent: [] }) };
+  });
+
+  get('tab-logs').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  get('btn-clear-logs').listeners.get('click')();
+  assert.equal(get('modal-clear-logs').classList.contains('hidden'), false);
+
+  get('btn-confirm-clear-logs').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cleared, true);
+  assert.equal(fetchedLogs, true);
+  assert.equal(get('modal-clear-logs').classList.contains('hidden'), true);
+});
+
+test('clear logs failure keeps the dialog open and shows the error banner', async () => {
+  const get = await renderPage(async (url, options = {}) => {
+    if (url === '/api/logs/clear' && options.method === 'POST') {
+      return { ok: false, status: 500, json: async () => ({ error: '磁盘只读' }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ gateway: { online: true }, total: {}, providerNames: [], trend: [], inflight: [], providers: [], models: [], recent: [] }) };
+  });
+
+  get('tab-logs').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  get('btn-clear-logs').listeners.get('click')();
+  get('btn-confirm-clear-logs').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('modal-clear-logs').classList.contains('hidden'), false);
+  assert.equal(get('clear-logs-error-msg').classList.contains('hidden'), false);
+  assert.match(get('clear-logs-error-msg').textContent, /磁盘只读/);
+});
+
+test('subagents tab switches view and fetches claude agent configuration', async () => {
+  const calls = [];
+  const get = await renderPage(async (url, options = {}) => {
+    calls.push([options.method || 'GET', String(url)]);
+    if (url.startsWith('/api/subagents?tool=claude')) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          tool: 'claude',
+          root: 'C:/Users/test/.claude/agents',
+          agents: [
+            { id: 'explore', name: 'Explore', description: '探索代码', model: 'fast', effort: null, tools: 'Read, Grep', sandbox: null, prompt: '原提示词', source: 'override', file: 'Explore.md', editable: true, revision: 'rev-1' }
+          ],
+          defaults: { model: 'fast', effort: null, revision: 'def-1', file: 'settings.json' },
+          warnings: ['警告示例'],
+          models: [
+            { id: 'fast', provider: 'openai', targetModel: 'gpt-4o-mini', available: true, status: 'ok' }
+          ]
+        })
+      };
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({ gateway: { online: true }, total: {}, providerNames: [], trend: [], inflight: [], providers: [], models: [], recent: [] })
+    };
+  });
+  get('tab-subagents').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('view-subagents').classList.contains('hidden'), false, '子代理视图显示');
+  assert.equal(get('view-overview').classList.contains('hidden'), true, '概览隐藏');
+  assert.ok(calls.some(([m, u]) => m === 'GET' && u.includes('/api/subagents?tool=claude')), '发起 claude 子代理配置请求');
+  assert.equal(get('subagents-board').children.length, 1);
+  assert.equal(get('sa-field-name').value, 'Explore');
+  assert.equal(get('sa-editor-form').classList.contains('hidden'), false);
+  assert.equal(get('subagents-warning-banner').classList.contains('hidden'), false);
+});
+
+test('subagents inspector edits drafts, switches tools, and confirms restore and privilege escalation', async () => {
+  const calls = [];
+  const get = await renderPage(async (url, options = {}) => {
+    calls.push([options.method || 'GET', String(url)]);
+    if (url.startsWith('/api/subagents?tool=claude')) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          tool: 'claude',
+          root: 'C:/Users/test/.claude/agents',
+          agents: [
+            { id: 'explore', name: 'Explore', description: '探索代码', model: 'fast', effort: null, tools: 'Read, Grep', sandbox: null, prompt: '原提示词', source: 'override', file: 'Explore.md', editable: true, revision: 'rev-1' }
+          ],
+          defaults: { model: 'fast', effort: null, revision: 'def-1', file: 'settings.json' },
+          warnings: [],
+          models: [
+            { id: 'fast', provider: 'openai', targetModel: 'gpt-4o-mini', available: true, status: 'ok' }
+          ]
+        })
+      };
+    }
+    if (url.startsWith('/api/subagents?tool=codex')) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          tool: 'codex',
+          root: 'C:/Users/test/.codex/agents',
+          agents: [
+            { id: 'worker', name: 'Worker', description: '执行任务', model: 'fast', effort: 'high', tools: null, sandbox: 'workspace-write', prompt: '执行提示词', source: 'override', file: 'worker.toml', editable: true, revision: 'rev-c1' }
+          ],
+          defaults: { model: 'fast', effort: 'medium', revision: 'def-c1', file: 'config.toml' },
+          warnings: [],
+          models: [
+            { id: 'fast', provider: 'openai', targetModel: 'gpt-4o-mini', available: true, status: 'ok' }
+          ]
+        })
+      };
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({ gateway: { online: true }, total: {}, providerNames: [], trend: [], inflight: [], providers: [], models: [], recent: [] })
+    };
+  });
+
+  // 1. 进入子代理页面
+  get('tab-subagents').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('subagents-save-state-text').textContent, '配置已读取');
+  get('sa-field-description').value = 'Edited draft';
+  get('sa-field-description').listeners.get('input')();
+  assert.equal(get('btn-subagent-save').disabled, false);
+  assert.equal(get('subagents-save-state-text').textContent, '有未保存修改');
+  get('btn-subagent-cancel').listeners.get('click')();
+  assert.equal(get('sa-field-description').value, '探索代码');
+  get('btn-mode-builtin').listeners.get('click')();
+  assert.equal(get('modal-subagents-reset').classList.contains('hidden'), false);
+  get('btn-subagents-reset-cancel').listeners.get('click')();
+
+  // 2. 切换到 codex
+  get('tool-codex').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('subagents-cab-effort-wrap').hidden, false, 'Codex 展示默认力度选项');
+  get('sa-field-sandbox').value = 'danger-full-access';
+  get('sa-field-sandbox').listeners.get('change')();
+  get('btn-subagent-save').listeners.get('click')();
+  assert.equal(get('modal-subagents-privilege').classList.contains('hidden'), false);
+  assert.ok(!calls.some(([method]) => method === 'PUT'));
+  get('btn-subagents-privilege-cancel').listeners.get('click')();
+  get('btn-subagent-cancel').listeners.get('click')();
+
+  // 3. 修改全局默认模型产生草稿
+  get('subagents-cab-default-select').value = '';
+  get('subagents-cab-default-select').listeners.get('change')({ target: { value: '' } });
+  assert.equal(get('btn-save-defaults').disabled, false, '修改默认模型后保存默认按钮变为可用');
+  assert.equal(get('subagents-save-state-text').textContent, '有未保存修改', '状态显示有未保存修改');
+  assert.equal(get('btn-check-models').disabled, true);
+  get('subagents-cab-default-select').listeners.get('change')({ target: { value: 'fast' } });
+
+  // 4. 打开弹窗检测模型
+  get('btn-check-models').listeners.get('click')();
+  assert.equal(get('modal-subagents-check').classList.contains('hidden'), false, '弹出费用提示确认弹窗');
+  get('btn-subagents-check-cancel').listeners.get('click')();
+  assert.equal(get('modal-subagents-check').classList.contains('hidden'), true, '取消关闭弹窗');
+});
+
+
+function getAllWireGroups(get) {
+  const outer = get('sb-wires').children[0]?.children || [];
+  const inner = get('sb-internal-wires').children[0]?.children || [];
+  return [...outer, ...inner];
+}
+
+function findWireGroupsByStage(get, stage) {
+  const groups = getAllWireGroups(get);
+  const prefixMap = {
+    source: 'in ',
+    ingress: 'internal-in ',
+    egress: 'internal-out ',
+    upstream: 'out ',
+  };
+  const prefix = prefixMap[stage] || stage;
+  return groups.filter((g) => {
+    const stageAttr = g.getAttribute('data-flow-stage');
+    const key = g.getAttribute('data-edge-key') || '';
+    if (key.includes('idle')) return false;
+    if (stageAttr && stageAttr !== 'idle') return stageAttr === stage;
+    return key.startsWith(prefix);
+  });
+}
+
+function isPacketVisible(flowPath) {
+  if (!flowPath) return false;
+  const vis = flowPath.style?.visibility || flowPath.getAttribute('visibility') || '';
+  if (vis === 'hidden') return false;
+  const dash = flowPath.style?.['stroke-dasharray'] || flowPath.style?.strokeDasharray || flowPath.getAttribute('stroke-dasharray') || '';
+  if (!dash || dash === 'none' || dash.startsWith('0 1000000')) return false;
+  return true;
+}
+
+function stageHasVisiblePacket(get, stage, agentFilter = null) {
+  const groups = findWireGroupsByStage(get, stage);
+  return groups.some((g) => {
+    const flows = g.children.slice(1);
+    return flows.some((f) => {
+      if (agentFilter) {
+        const agent = f.dataset?.flowAgent || f.getAttribute('data-flow-agent');
+        if (agent !== agentFilter) return false;
+      }
+      return isPacketVisible(f);
+    });
+  });
+}
+
+test('switchboard packet animation propagates along full link in sequential stages (source -> ingress -> egress -> upstream)', async () => {
+  const request = {
+    requestId: 'req-packet-1', route: 'main', provider: 'relay', model: 'actual',
+    clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct', elapsedMs: 100
+  };
+  const configured = [{ ...request }];
+  const active = [request];
+
+  const get = await renderPage(async () => ({
+    ok: true, status: 200, json: async () => ({
+      online: true, activeRequests: active.length,
+      gateway: { online: true, activeRequests: active.length },
+      total: {}, providers: [], providerNames: ['relay'], models: [], recent: [], trend: [], switchboard: [],
+      inflight: active, switchboardActive: active, switchboardRetained: [], switchboardConfigured: configured,
+    })
+  }), Date, { raf: true, initialPerfTime: 0 });
+
+  const groups = getAllWireGroups(get);
+  assert.ok(groups.length >= 4);
+  for (const group of groups) {
+    assert.ok(group.getAttribute('data-edge-key'));
+    assert.match(group.children[0]?.className || '', /sb-wire/);
+    for (const flow of group.children.slice(1)) {
+      assert.match(flow.className || '', /sb-flow/);
+      assert.ok(flow.dataset?.flowAgent || flow.getAttribute('data-flow-agent'));
+      const offset = flow.getAttribute('stroke-dashoffset') ?? flow.style?.['stroke-dashoffset'] ?? flow.style?.strokeDashoffset;
+      assert.equal(String(offset), '0');
+    }
+  }
+
+  assert.equal(stageHasVisiblePacket(get, 'source'), false);
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), false);
+  assert.equal(stageHasVisiblePacket(get, 'egress'), false);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), false);
+
+  get.stepRaf(200);
+  assert.equal(stageHasVisiblePacket(get, 'source'), true);
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), false);
+  assert.equal(stageHasVisiblePacket(get, 'egress'), false);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), false);
+
+  const sourceFlow = findWireGroupsByStage(get, 'source')[0].children[1];
+  const dashStr = sourceFlow.style['stroke-dasharray'];
+  const dashes = dashStr.split(/\s+/).map(Number);
+  const trailingGap = dashes[dashes.length - 1];
+  assert.ok(trailingGap >= 100);
+
+  get.stepRaf(300); // 500ms
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), true);
+  assert.equal(stageHasVisiblePacket(get, 'egress'), false);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), false);
+
+  get.stepRaf(400); // 900ms
+  assert.equal(stageHasVisiblePacket(get, 'egress'), true);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), false);
+
+  get.stepRaf(400); // 1300ms
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), true);
+});
+
+test('switchboard packet timeline is preserved across same-id polling and resize, and restarts from source for new request id', async () => {
+  let active = [{
+    requestId: 'req-same-1', route: 'main', provider: 'relay', model: 'actual',
+    clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct', elapsedMs: 100
+  }];
+  const configured = [{ ...active[0] }];
+
+  const get = await renderPage(async () => ({
+    ok: true, status: 200, json: async () => ({
+      online: true, activeRequests: active.length,
+      gateway: { online: true, activeRequests: active.length },
+      total: {}, providers: [], providerNames: ['relay'], models: [], recent: [], trend: [], switchboard: [],
+      inflight: active, switchboardActive: active, switchboardRetained: [], switchboardConfigured: configured,
+    })
+  }), Date, { raf: true, initialPerfTime: 0 });
+
+  const poll = get.intervals.at(-1);
+
+  get.stepRaf(500);
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), true);
+
+  await poll();
+  get.stepRaf(16);
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), true);
+
+  get.triggerResize();
+  get.stepRaf(16);
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), true);
+
+  active = [{
+    requestId: 'req-fresh-2', route: 'main', provider: 'relay', model: 'actual',
+    clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct', elapsedMs: 50
+  }];
+  await poll();
+  get.stepRaf(0);
+
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), false);
+  assert.equal(stageHasVisiblePacket(get, 'egress'), false);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), false);
+
+  get.stepRaf(200);
+  assert.equal(stageHasVisiblePacket(get, 'source'), true);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), false);
+});
+
+test('switchboard multi-agent flows propagate independently, non-live states remain quiet, filters clear flows, and reduced motion disables raf loop', async () => {
+  const reqA = {
+    requestId: 'req-agent-a', route: 'route-a', provider: 'p-a', model: 'm-a',
+    clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct', elapsedMs: 200
+  };
+  const reqB = {
+    requestId: 'req-agent-b', route: 'route-b', provider: 'p-b', model: 'm-b',
+    clientType: 'claude-code', inputProtocol: 'messages', upstreamProtocol: 'responses', adapter: 'messages-to-responses', elapsedMs: 10
+  };
+  let active = [reqA];
+  let retained = [];
+  let online = true;
+  let unknown = false;
+  let instanceId = 'inst-1';
+  let filter = '';
+  const configured = [{ ...reqA }, { ...reqB }];
+
+  const get = await renderPage(async (url) => {
+    const isLive = String(url).includes('/api/switchboard/live');
+    const filteredActive = filter ? active.filter((r) => r.provider === filter) : active;
+    const filteredRetained = filter ? retained.filter((r) => r.provider === filter) : retained;
+    return {
+      ok: true, status: 200, json: async () => ({
+        online, instanceId, activeRequests: filteredActive.length, liveUnknown: unknown,
+        gateway: { online, instanceId, activeRequests: filteredActive.length },
+        total: {}, providers: [], providerNames: ['p-a', 'p-b'], models: [], recent: [], trend: [], switchboard: [],
+        inflight: filteredActive, switchboardActive: filteredActive, switchboardRetained: filteredRetained, switchboardConfigured: configured,
+      })
+    };
+  }, Date, { raf: true, initialPerfTime: 0 });
+
+  const poll = get.intervals.at(-1);
+
+  get.stepRaf(500);
+  assert.equal(stageHasVisiblePacket(get, 'ingress', 'codex'), true);
+
+  active = [reqA, reqB];
+  await poll();
+
+  get.stepRaf(200); // 700ms (reqA has run 700ms, reqB has run 200ms)
+  assert.equal(stageHasVisiblePacket(get, 'ingress', 'codex'), true);
+  assert.equal(stageHasVisiblePacket(get, 'source', 'claudecode'), true);
+  assert.equal(stageHasVisiblePacket(get, 'upstream', 'claudecode'), false);
+
+  active = [];
+  retained = [{ ...reqA, finishedAt: new Date().toISOString() }];
+  await poll();
+  get.stepRaf(100);
+  assert.equal(stageHasVisiblePacket(get, 'source'), false);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), false);
+
+  unknown = true;
+  await poll();
+  get.stepRaf(100);
+  assert.equal(stageHasVisiblePacket(get, 'source'), false);
+
+  unknown = false;
+  online = false;
+  await poll();
+  get.stepRaf(100);
+  assert.equal(stageHasVisiblePacket(get, 'source'), false);
+
+  online = true;
+  active = [reqA];
+  await poll();
+  get.stepRaf(500);
+  assert.equal(stageHasVisiblePacket(get, 'ingress', 'codex'), true);
+
+  filter = 'p-b';
+  get('filter-provider').value = 'p-b';
+  get('filter-provider').listeners.get('change')({ target: get('filter-provider') });
+  await new Promise((resolve) => setImmediate(resolve));
+  await poll();
+  get.stepRaf(16);
+  assert.equal(stageHasVisiblePacket(get, 'ingress', 'codex'), false);
+
+  filter = '';
+  get('filter-provider').value = '';
+  get('filter-provider').listeners.get('change')({ target: get('filter-provider') });
+  await new Promise((resolve) => setImmediate(resolve));
+  await poll();
+  get.stepRaf(500);
+  assert.equal(stageHasVisiblePacket(get, 'ingress', 'codex'), true);
+
+  instanceId = 'inst-2';
+  await poll();
+  get.stepRaf(0);
+  assert.equal(stageHasVisiblePacket(get, 'ingress', 'codex'), false);
+
+  get.stepRaf(500);
+  assert.ok(get.rafCallbacks.size > 0);
+  get('tab-logs').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get.rafCallbacks.size, 0);
+
+  const getReduced = await renderPage(async () => ({
+    ok: true, status: 200, json: async () => ({
+      online: true, activeRequests: 1,
+      gateway: { online: true, activeRequests: 1 },
+      total: {}, providers: [], providerNames: ['p-a'], models: [], recent: [], trend: [], switchboard: [],
+      inflight: [reqA], switchboardActive: [reqA], switchboardRetained: [], switchboardConfigured: configured,
+    })
+  }), Date, { raf: true, reducedMotion: true });
+
+  assert.equal(getReduced.rafCallbacks.size, 0);
+});
+
+test('a second request from the same agent creates its own adapter and upstream flow without resetting the first', async () => {
+  const reqA = { requestId: 'same-agent-a', route: 'a', provider: 'p-a', model: 'm-a', clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct' };
+  const reqB = { requestId: 'same-agent-b', route: 'b', provider: 'p-b', model: 'm-b', clientType: 'codex', inputProtocol: 'messages', upstreamProtocol: 'chat-completions', adapter: 'messages-to-chat-completions' };
+  let active = [reqA];
+  const get = await renderPage(async () => ({ ok: true, status: 200, json: async () => ({
+    online: true, activeRequests: active.length, switchboardActiveRequests: active.length,
+    gateway: { online: true, activeRequests: active.length },
+    total: {}, providers: [], providerNames: ['p-a', 'p-b'], models: [], recent: [], trend: [], switchboard: [],
+    inflight: active, switchboardActive: active, switchboardConfigured: [reqA, reqB],
+  }) }), Date, { raf: true, initialPerfTime: 0 });
+  const flow = (key) => getAllWireGroups(get).find((group) => group.getAttribute('data-edge-key') === key)?.children[1];
+  const adapterKey = JSON.stringify([reqB.inputProtocol, reqB.upstreamProtocol, reqB.adapter]);
+  const upstreamA = 'out ' + JSON.stringify([reqA.provider, reqA.model]);
+  const upstreamB = 'out ' + JSON.stringify([reqB.provider, reqB.model]);
+  get.stepRaf(1300);
+  assert.equal(isPacketVisible(flow(upstreamA)), true);
+  active = [reqA, reqB];
+  await get.intervals.at(-1)();
+  get.stepRaf(200);
+  assert.equal(get('sb-active').textContent, '2');
+  assert.ok(flow('internal-in ' + adapterKey), 'second adapter must exist');
+  assert.ok(flow('internal-out ' + adapterKey), 'second adapter egress must exist');
+  assert.ok(flow(upstreamB), 'second upstream must exist');
+  assert.equal(isPacketVisible(flow(upstreamA)), true, 'first request clock must not reset');
+  assert.equal(isPacketVisible(flow('internal-in ' + adapterKey)), false, 'second request must start at its source');
+  assert.equal(isPacketVisible(flow(upstreamB)), false, 'second request must not instantly fill its upstream');
+  get.stepRaf(300);
+  assert.equal(isPacketVisible(flow('internal-in ' + adapterKey)), true);
+  get.stepRaf(400);
+  assert.equal(isPacketVisible(flow('internal-out ' + adapterKey)), true);
+  assert.equal(isPacketVisible(flow(upstreamB)), false);
+  get.stepRaf(400);
+  assert.equal(isPacketVisible(flow(upstreamB)), true);
+  active = [reqA];
+  await get.intervals.at(-1)();
+  get.stepRaf(0);
+  assert.equal(get('sb-active').textContent, '1');
+  assert.equal(isPacketVisible(flow(upstreamA)), true, 'second completion must not remove the first flow');
+  assert.equal(isPacketVisible(flow(upstreamB)), false);
+});
+
+test('same-agent requests sharing a path retain separate clocks and finish independently', async () => {
+  const reqA = { requestId: 'shared-a', route: 'main', provider: 'relay', model: 'actual', clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct' };
+  const reqB = { ...reqA, requestId: 'shared-b' };
+  let active = [reqA];
+  const snapshot = (requests) => ({ online: true, activeRequests: requests.length, switchboardActiveRequests: requests.length,
+    gateway: { online: true, activeRequests: requests.length },
+    total: {}, providers: [], providerNames: ['relay'], models: [], recent: [], trend: [], switchboard: [],
+    inflight: requests, switchboardActive: requests, switchboardConfigured: [reqA] });
+  const get = await renderPage(async () => ({ ok: true, status: 200, json: async () => snapshot(active) }), Date, { raf: true, initialPerfTime: 0 });
+  const control = await renderPage({ ok: true, status: 200, json: async () => snapshot([reqA]) }, Date, { raf: true, initialPerfTime: 0 });
+  const source = () => findWireGroupsByStage(get, 'source')[0].children[1];
+  get.stepRaf(900);
+  const sourceNode = source();
+  const firstDashes = sourceNode.style['stroke-dasharray'];
+  active = [reqA, reqB];
+  await get.intervals.at(-1)();
+  get.stepRaf(0);
+  assert.equal(get('sb-active').textContent, '2');
+  assert.equal(source(), sourceNode, 'shared flow should retain DOM identity');
+  assert.equal(source().style['stroke-dasharray'], firstDashes, 'adding B must preserve A clock');
+  assert.equal(getAllWireGroups(get).filter((group) => group.children.slice(1).some((flow) => flow.dataset?.flowAgent === 'codex')).length, 4, 'same topology uses one active physical path');
+  get.stepRaf(200);
+  control.stepRaf(1100);
+  assert.notEqual(source().style['stroke-dasharray'], findWireGroupsByStage(control, 'source')[0].children[1].style['stroke-dasharray'], 'B must contribute packets at its own phase');
+  active = [reqB];
+  await get.intervals.at(-1)();
+  get.stepRaf(0);
+  assert.equal(get('sb-active').textContent, '1');
+  assert.equal(stageHasVisiblePacket(get, 'source'), true);
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), false, 'completed A packets must disappear');
+  assert.equal(stageHasVisiblePacket(get, 'egress'), false);
+  get.stepRaf(300);
+  assert.equal(stageHasVisiblePacket(get, 'ingress'), true, 'B clock must survive A completion');
+  get.stepRaf(800);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), true);
+  active = [];
+  await get.intervals.at(-1)();
+  get.stepRaf(0);
+  assert.equal(get('sb-active').textContent, '0');
+  assert.equal(stageHasVisiblePacket(get, 'source'), false);
+  assert.equal(stageHasVisiblePacket(get, 'upstream'), false);
+  assert.equal(get.rafCallbacks.size, 0);
+});
+
+test('filtered overview and live counts never enable restart while other providers have HTTP activity', async () => {
+  const reqA = { requestId: 'filtered-a', route: 'a', provider: 'p-a', model: 'm-a', clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct' };
+  const reqB = { ...reqA, requestId: 'filtered-b', route: 'b', provider: 'p-b', model: 'm-b' };
+  let active = [reqA, reqB];
+  const get = await renderPage(async (url) => {
+    const provider = new URL(url, 'http://admin.test').searchParams.get('provider');
+    const filtered = active.filter((item) => !provider || item.provider === provider);
+    return { ok: true, status: 200, json: async () => ({
+      online: true, activeRequests: active.length, switchboardActiveRequests: filtered.length,
+      gateway: { online: true, activeRequests: active.length },
+      total: {}, providers: [], providerNames: ['p-a', 'p-b'], models: [], recent: [], trend: [], switchboard: [],
+      inflight: filtered, switchboardActive: filtered, switchboardConfigured: [reqA, reqB].filter((item) => !provider || item.provider === provider),
+    }) };
+  });
+  assert.equal(get('sb-active').textContent, '2');
+  get('filter-provider').value = 'p-a';
+  get('filter-provider').listeners.get('change')({ target: get('filter-provider') });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('sb-active').textContent, '1');
+  assert.equal(get('meta-active').textContent, 2);
+  assert.equal(get('btn-open-restart').disabled, true);
+  await get.intervals.at(-1)();
+  assert.equal(get('sb-active').textContent, '1');
+  assert.match(get('btn-open-restart').title, /2 个在途请求/);
+  active = [reqB];
+  await get.intervals.at(-1)();
+  assert.equal(get('sb-active').textContent, '0');
+  assert.equal(get('btn-open-restart').disabled, true);
+  assert.match(get('btn-open-restart').title, /1 个在途请求/);
+  get('btn-refresh-overview').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(get('sb-active').textContent, '0');
+  assert.equal(get('meta-active').textContent, 1);
+  assert.equal(get('btn-open-restart').disabled, true);
+  active = [];
+  await get.intervals.at(-1)();
+  assert.equal(get('btn-open-restart').disabled, false);
 });

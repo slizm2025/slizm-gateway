@@ -121,6 +121,29 @@
         <path d="M9 14 4 9l5-5"/>
         <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>
       </g>
+      <!-- bot -->
+      <g id="icon-bot">
+        <path d="M12 8V4"/>
+        <rect x="4" y="8" width="16" height="12" rx="2"/>
+        <path d="M2 14h2"/>
+        <path d="M20 14h2"/>
+        <path d="M15 13v2"/>
+        <path d="M9 13v2"/>
+      </g>
+      <!-- pen -->
+      <g id="icon-pen">
+        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+      </g>
+      <!-- check -->
+      <g id="icon-check">
+        <path d="M20 6 9 17l-5-5"/>
+      </g>
+      <!-- alert-triangle -->
+      <g id="icon-alert-triangle">
+        <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+        <line x1="12" y1="9" x2="12" y2="13"/>
+        <line x1="12" y1="17" x2="12.01" y2="17"/>
+      </g>
     </defs>
   </svg>
 
@@ -150,6 +173,10 @@
       <button class="nav-tab" data-view="settings" id="tab-settings" title="基础设置">
         <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-settings"/></svg>
         <span class="nav-text">基础设置</span>
+      </button>
+      <button class="nav-tab" data-view="subagents" id="tab-subagents" title="子代理编排">
+        <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-bot"/></svg>
+        <span class="nav-text">子代理</span>
       </button>
     </nav>
     <div class="sidebar-footer">
@@ -589,6 +616,188 @@
       </div>
     </section>
 
+    <!-- 子代理编排视图 (三栏式工作区架构) -->
+    <section id="view-subagents" class="view-panel hidden">
+      <div id="subagents-warning-banner" class="banner banner-warning hidden" role="alert">
+        <div id="subagents-warning-list"></div>
+      </div>
+
+      <div class="sa-top-actions">
+        <div class="sa-top-left">
+          <span class="sync-state" id="subagents-save-state">
+            <span id="subagents-save-state-text">正在读取</span>
+          </span>
+        </div>
+        <div class="sa-top-right">
+          <button id="btn-check-models" class="btn btn-secondary" type="button" title="逐路由向网关发送最小请求检测模型连通性">
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-refresh"/></svg>
+            <span id="btn-check-models-text">检测模型</span>
+          </button>
+          <button class="btn btn-primary" id="btn-new-agent" type="button">
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg>
+            <span>新建子代理</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="sa-workspace" aria-label="子代理编排工作区">
+        <!-- 左侧导轨 (Tool Rail) -->
+        <aside class="sa-tool-rail" aria-label="Agent 工具切换">
+          <p class="sa-section-label">AGENT 工具</p>
+          <div class="sa-tool-list" role="tablist">
+            <button class="sa-tool-item active" id="tool-claude" data-tool="claude" type="button" role="tab" aria-selected="true">
+              <span class="sa-tool-icon">CC</span>
+              <span class="sa-tool-name">Claude Code</span>
+              <span class="sa-tool-count" id="count-claude">0</span>
+            </button>
+            <button class="sa-tool-item" id="tool-codex" data-tool="codex" type="button" role="tab" aria-selected="false">
+              <span class="sa-tool-icon">CX</span>
+              <span class="sa-tool-name">Codex</span>
+              <span class="sa-tool-count" id="count-codex">0</span>
+            </button>
+          </div>
+
+          <!-- 全局默认模型及力度可折叠配置 -->
+          <div class="sa-defaults-panel">
+            <details class="sa-defaults-details" open>
+              <summary class="sa-defaults-summary">全局默认设置</summary>
+              <div class="sa-defaults-body">
+                <div class="sa-field">
+                  <label for="subagents-cab-default-select" id="subagents-cab-default-label">默认模型</label>
+                  <select class="form-select sa-select" id="subagents-cab-default-select" aria-label="全局默认模型"></select>
+                </div>
+                <div class="sa-field" id="subagents-cab-effort-wrap" hidden>
+                  <label for="subagents-cab-default-effort">默认推理力度</label>
+                  <select class="form-select sa-select" id="subagents-cab-default-effort" aria-label="Codex 默认推理力度">
+                    <option value="">未指定</option>
+                    <option value="minimal">minimal</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                </div>
+                <button id="btn-save-defaults" class="btn btn-secondary btn-compact" type="button" disabled title="保存全局默认设置">
+                  <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-save"/></svg>
+                  <span>保存默认</span>
+                </button>
+              </div>
+            </details>
+          </div>
+
+          <div class="sa-config-source">
+            <span>当前配置根</span>
+            <code id="subagents-cab-root">~/.claude/agents</code>
+          </div>
+        </aside>
+
+        <!-- 中间接线板 (Board) -->
+        <section class="sa-board">
+          <header class="sa-board-head">
+            <div class="sa-board-title">
+              <div class="sa-root-mark" aria-hidden="true">
+                <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-bot"/></svg>
+              </div>
+              <div>
+                <h2>接线板</h2>
+                <p id="sa-board-subtitle">子代理配置</p>
+              </div>
+            </div>
+            <div class="sa-summary" aria-label="配置概览">
+              <div class="sa-summary-item"><strong id="summary-count-override">0</strong><span>覆盖/自定义</span></div>
+              <div class="sa-summary-item"><strong id="summary-count-builtin">0</strong><span>内置未接管</span></div>
+              <div class="sa-summary-item"><strong id="summary-count-models">0</strong><span>独立模型</span></div>
+            </div>
+          </header>
+
+          <div class="sa-board-tools">
+            <label class="sa-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
+              <input id="sa-search-input" type="search" placeholder="搜索名称、作用或模型" aria-label="搜索子代理" autocomplete="off" />
+            </label>
+            <div class="sa-filter-group" role="group" aria-label="按接管方式筛选">
+              <button class="sa-filter-btn active" type="button" data-filter="all">全部</button>
+              <button class="sa-filter-btn" type="button" data-filter="override">已接管</button>
+              <button class="sa-filter-btn" type="button" data-filter="builtin">内置</button>
+            </div>
+          </div>
+
+          <div class="sa-agent-canvas">
+            <div class="sa-agent-grid" id="subagents-board" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <!-- 右侧常驻检查器 (Inspector) -->
+        <aside class="sa-inspector" id="subagents-inspector" aria-label="子代理配置">
+          <header class="sa-inspector-head">
+            <div class="sa-kicker" id="sa-inspector-kicker">正在编辑</div>
+            <h2 id="sa-inspector-title">选择子代理</h2>
+            <p id="sa-inspector-source">用户级配置</p>
+          </header>
+          <form class="sa-form" id="sa-editor-form">
+            <div class="sa-field">
+              <label for="sa-field-name">名称</label>
+              <input class="form-input sa-input" id="sa-field-name" name="name" autocomplete="off" />
+            </div>
+            <div class="sa-field">
+              <label for="sa-field-description">作用与调用时机</label>
+              <textarea class="form-input sa-textarea" id="sa-field-description" name="description" rows="3"></textarea>
+            </div>
+            <div class="sa-field" id="sa-takeover-field">
+              <label>接管方式</label>
+              <div class="sa-mode-group" role="group" aria-label="接管方式">
+                <button class="sa-mode-btn" type="button" id="btn-mode-override" data-mode="override">覆盖内置</button>
+                <button class="sa-mode-btn" type="button" id="btn-mode-builtin" data-mode="builtin">跟随内置</button>
+              </div>
+            </div>
+            <div class="sa-field">
+              <label for="sa-field-model">调用模型</label>
+              <select class="form-select sa-select" id="sa-field-model" name="model"></select>
+            </div>
+            <div class="sa-model-preview" aria-label="模型解析结果">
+              <div>
+                <strong id="sa-preview-model">未指定</strong>
+                <span id="sa-preview-route">全局兜底 / 跟随主会话</span>
+              </div>
+            </div>
+            <div class="sa-field" id="sa-wrap-effort" hidden>
+              <label for="sa-field-effort">推理力度 (effort)</label>
+              <select class="form-select sa-select" id="sa-field-effort" name="effort">
+                <option value="">未指定 (全局兜底)</option>
+                <option value="minimal">minimal</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="xhigh">xhigh</option>
+              </select>
+            </div>
+            <div class="sa-field" id="sa-wrap-sandbox" hidden>
+              <label for="sa-field-sandbox">沙箱权限 (sandbox)</label>
+              <select class="form-select sa-select" id="sa-field-sandbox" name="sandbox">
+                <option value="">未指定</option>
+                <option value="read-only">read-only</option>
+                <option value="workspace-write">workspace-write</option>
+                <option value="danger-full-access">danger-full-access</option>
+              </select>
+            </div>
+            <div class="sa-field" id="sa-wrap-tools">
+              <label for="sa-field-tools">可用工具白名单 (留空为全部)</label>
+              <input class="form-input sa-input" id="sa-field-tools" name="tools" autocomplete="off" placeholder="Read, Grep, Glob" />
+            </div>
+            <div class="sa-field">
+              <label for="sa-field-prompt">系统指令内容 (prompt)</label>
+              <textarea class="form-input sa-textarea" id="sa-field-prompt" name="prompt" rows="8"></textarea>
+            </div>
+            <div class="sa-form-actions">
+              <button class="btn btn-primary" id="btn-subagent-save" type="button"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-save"/></svg>保存配置</button>
+              <button class="btn btn-secondary" id="btn-subagent-cancel" type="button"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-undo"/></svg>放弃草稿</button>
+              <span class="sa-scope-note" id="sa-drawer-foot-note">直接写回对应工具配置</span>
+            </div>
+          </form>
+        </aside>
+      </div>
+    </section>
+
     <!-- VIEW 3: 请求日志 (Logs) -->
     <section id="view-logs" class="view-panel hidden">
       <div class="toolbar">
@@ -620,6 +829,10 @@
             <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-download"/></svg>
             <span>导出日志</span>
           </button>
+          <button id="btn-clear-logs" class="btn btn-secondary" title="清空 stdout 与 stderr 日志文件" aria-label="清空日志文件">
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-trash"/></svg>
+            <span>清空日志</span>
+          </button>
           <button id="btn-refresh-logs" class="btn btn-icon" title="手动刷新日志" aria-label="手动刷新日志">
             <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-refresh"/></svg>
           </button>
@@ -641,44 +854,95 @@
       </div>
 
       <div id="settings-readonly">
-        <div class="settings-overview-head">
-          <div>
-            <div class="settings-kicker">当前配置</div>
-            <h2>网关配置</h2>
-            <p>当前已保存的提供商、路由及请求日志设置</p>
+        <div class="settings-toolbar">
+          <div class="settings-strip" aria-label="配置概览指标">
+            <div class="settings-strip-item">
+              <span class="settings-strip-label">上游站点</span>
+              <strong id="settings-provider-count" class="num-font">—</strong>
+            </div>
+            <div class="settings-strip-divider"></div>
+            <div class="settings-strip-item">
+              <span class="settings-strip-label">路由规则</span>
+              <strong id="settings-route-count" class="num-font">—</strong>
+            </div>
+            <div class="settings-strip-divider"></div>
+            <div class="settings-strip-item">
+              <span class="settings-strip-label">默认路由</span>
+              <strong id="settings-default-route" class="num-font">—</strong>
+            </div>
+            <div class="settings-strip-divider"></div>
+            <div class="settings-strip-item">
+              <span class="settings-strip-label">详细日志</span>
+              <strong id="settings-log-requests">—</strong>
+            </div>
           </div>
-          <button id="btn-edit-settings" class="btn btn-primary" type="button" title="修改网关配置">修改配置</button>
+          <button id="btn-edit-settings" class="btn btn-primary" type="button" title="进入编辑模式修改配置">
+            <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-pen"/></svg>
+            <span>编辑配置</span>
+          </button>
         </div>
-        <div class="settings-summary" aria-label="配置摘要">
-          <div><span>上游站点</span><strong id="settings-provider-count" class="num-font">—</strong></div>
-          <div><span>路由规则</span><strong id="settings-route-count" class="num-font">—</strong></div>
-          <div><span>默认路由</span><strong id="settings-default-route" class="num-font">—</strong></div>
-          <div><span>请求详细日志</span><strong id="settings-log-requests">—</strong></div>
-        </div>
-        <div class="section-container settings-read-section">
-          <div class="section-header"><h3 class="section-title">上游提供商</h3>
-            <div class="section-tools"><button class="btn btn-secondary btn-compact" type="button" data-settings-open="provider:new"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加提供商</span></button></div>
+
+        <div class="settings-read-section">
+          <div class="section-header">
+            <h3 class="section-title">上游服务商</h3>
+            <div class="section-tools">
+              <button class="btn btn-secondary btn-compact" type="button" data-settings-open="provider:new">
+                <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg>
+                <span>添加服务商</span>
+              </button>
+            </div>
           </div>
           <div id="settings-providers-readonly" class="settings-provider-list"></div>
         </div>
-        <div class="section-container settings-read-section">
-          <div class="section-header"><h3 class="section-title">路由映射</h3>
-            <div class="section-tools"><button class="btn btn-secondary btn-compact" type="button" data-settings-open="route:new"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加路由</span></button></div>
+
+        <div class="settings-read-section">
+          <div class="section-header">
+            <h3 class="section-title">路由映射</h3>
+            <div class="section-tools">
+              <button class="btn btn-secondary btn-compact" type="button" data-settings-open="route:new">
+                <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg>
+                <span>添加路由</span>
+              </button>
+            </div>
           </div>
           <div class="table-scroll-wrap">
             <table class="data-table settings-routes-table">
-              <thead><tr><th>路由别名</th><th>目标提供商</th><th>目标模型</th><th>客户端配置</th><th class="th-action">操作</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>路由别名</th>
+                  <th>目标服务商</th>
+                  <th>目标模型</th>
+                  <th>客户端配置</th>
+                  <th class="th-action">操作</th>
+                </tr>
+              </thead>
               <tbody id="settings-routes-readonly"></tbody>
             </table>
           </div>
         </div>
-        <div class="section-container settings-read-section">
-          <div class="section-header"><h3 class="section-title">模型价格（USD / 1M tokens）</h3>
-            <div class="section-tools"><button class="btn btn-secondary btn-compact" type="button" data-settings-open="pricing:new"><svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg><span>添加模型</span></button></div>
+
+        <div class="settings-read-section">
+          <div class="section-header">
+            <h3 class="section-title">模型价格（USD / 1M tokens）</h3>
+            <div class="section-tools">
+              <button class="btn btn-secondary btn-compact" type="button" data-settings-open="pricing:new">
+                <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg>
+                <span>添加模型</span>
+              </button>
+            </div>
           </div>
           <div class="table-scroll-wrap">
             <table class="data-table settings-pricing-table">
-              <thead><tr><th>模型</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th class="th-action">操作</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th>输入</th>
+                  <th>输出</th>
+                  <th>缓存读</th>
+                  <th>缓存写</th>
+                  <th class="th-action">操作</th>
+                </tr>
+              </thead>
               <tbody id="settings-pricing-readonly"></tbody>
             </table>
           </div>
@@ -705,7 +969,7 @@
           </div>
         </div>
         <!-- 全局通用设置 -->
-      <div class="section-container settings-section" id="settings-section-general">
+      <div class="settings-section" id="settings-section-general">
         <div class="section-header">
           <h2 class="section-title">通用设置</h2>
         </div>
@@ -728,7 +992,7 @@
       </div>
 
       <!-- 上游提供商 (Providers) -->
-      <div class="section-container settings-section" id="settings-section-providers">
+      <div class="settings-section" id="settings-section-providers">
         <div class="section-header">
           <h2 class="section-title">上游提供商</h2>
           <div class="section-tools">
@@ -747,7 +1011,7 @@
       </div>
 
       <!-- 路由映射规则 (Routes) -->
-      <div class="section-container settings-section" id="settings-section-routes">
+      <div class="settings-section" id="settings-section-routes">
         <div class="section-header">
           <h2 class="section-title">路由映射规则</h2>
           <div class="section-tools">
@@ -777,7 +1041,7 @@
       </div>
 
       <!-- 模型价格 (Pricing)：全局原价，站点倍率在各提供商卡片内设置 -->
-      <div class="section-container settings-section" id="settings-section-pricing">
+      <div class="settings-section" id="settings-section-pricing">
         <div class="section-header">
           <h2 class="section-title">模型价格（USD / 1M tokens）</h2>
           <div class="section-tools">
@@ -822,6 +1086,27 @@
     </div>
   </div>
 
+
+  <!-- 模态框: 确认清空请求日志 -->
+  <div id="modal-clear-logs" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-clear-logs-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-clear-logs-title" class="modal-title">清空请求日志</h3>
+        <button id="modal-clear-logs-close" class="btn btn-icon btn-ghost" title="关闭对话框" aria-label="关闭对话框">
+          <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p>确认要清空请求日志吗？将同时清空 stdout（gateway.out.log）与 stderr（gateway.err.log）两个文件且不可恢复，后续新请求的日志会继续写入。</p>
+        <div id="clear-logs-error-msg" class="banner banner-danger mt-2 radius-4 hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancel-clear-logs" class="btn btn-secondary" type="button">取消</button>
+        <button id="btn-confirm-clear-logs" class="btn btn-danger" type="button">确认清空</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 模态框: 未保存离开提示 -->
   <div id="modal-unsaved" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-unsaved-title">
     <div class="modal-dialog">
@@ -841,9 +1126,72 @@
     </div>
   </div>
 
+
+  <!-- 模态框: 恢复内置确认 -->
+  <div id="modal-subagents-reset" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-subagents-reset-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-subagents-reset-title" class="modal-title">恢复内置子代理</h3>
+        <button id="modal-subagents-reset-close" class="btn btn-icon btn-ghost" title="关闭对话框" aria-label="关闭对话框">
+          <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p id="subagents-reset-message">确认备份并移除用户覆盖，恢复客户端内置角色吗？网关将为您自动备份当前文件。</p>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-subagents-reset-cancel" class="btn btn-secondary" type="button">取消</button>
+        <button id="btn-subagents-reset-confirm" class="btn btn-danger" type="button">确认恢复内置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框: 权限提升确认 (danger-full-access) -->
+  <div id="modal-subagents-privilege" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-subagents-privilege-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-subagents-privilege-title" class="modal-title">危险沙箱权限警告</h3>
+        <button id="modal-subagents-privilege-close" class="btn btn-icon btn-ghost" title="关闭对话框" aria-label="关闭对话框">
+          <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="banner banner-danger mb-3 radius-4">
+          <strong>安全警示：</strong>您正将该子代理沙箱权限提升为 <code>danger-full-access</code>。
+        </div>
+        <p>该子代理执行时将完全脱离沙箱隔离保护，可直接访问宿主机任意系统资源与外部网络。确认要保存此安全权限提升吗？</p>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-subagents-privilege-cancel" class="btn btn-secondary" type="button">取消并修改</button>
+        <button id="btn-subagents-privilege-confirm" class="btn btn-danger" type="button">确认权限提升并保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框: 检测模型计费确认 -->
+  <div id="modal-subagents-check" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-subagents-check-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-subagents-check-title" class="modal-title">检测模型连通性</h3>
+        <button id="modal-subagents-check-close" class="btn btn-icon btn-ghost" title="关闭对话框" aria-label="关闭对话框">
+          <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-x"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p>将通过网关向当前工具的候选路由发送测试请求，输出预算为 96 tokens。</p>
+        <p class="mt-2 text-muted"><strong>费用提醒：</strong>此操作会产生实际调用费用，具体由各提供商计费。确认开始检测吗？</p>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-subagents-check-cancel" class="btn btn-secondary" type="button">取消</button>
+        <button id="btn-subagents-check-confirm" class="btn btn-primary" type="button">确认开始检测</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast 消息容器 -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
+  <script src="/subagents.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

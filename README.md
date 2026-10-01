@@ -13,6 +13,7 @@ Claude Code 多 provider 网关
 ```bash
 git clone https://github.com/slizm2025/slizm-gateway.git
 cd slizm-gateway
+npm ci
 ```
 
 创建不会提交到 Git 的本地配置文件：
@@ -73,7 +74,7 @@ node scripts/gw.js status   # 查看 PID、transport 和源码更新提示
 - `/health` 含运行实例PID、启动时间和传输版本，但只代表本地进程可用。源码修改后应在请求完成后重启；管理器拒绝停止无法核验身份的旧版进程，旧实例需核对命令行后手动迁移。
 - 流式错误不再产生成功 `message_stop`；为正确拼接分片工具名称，OpenAI工具块在完整收到后输出，普通文本保持增量输出。
 - 生产TLS校验始终开启，`allowInsecureTls:true` 现在报配置错误而非被静默忽略。可信自签CA应通过 `NODE_EXTRA_CA_CERTS` 配置。
-- 环境变量优先于 `.env`；密钥、路由等运行配置变更仍需要重启，模型价格与 provider 倍率支持热更新。
+- 环境变量优先于 `.env`；基础设置中的密钥、路由、上游、超时、并发和价格保存后热更新。进程环境变量、监听地址和端口变更仍需重启。
 
 ## 本地管理 Web
 
@@ -89,10 +90,23 @@ node scripts/gw.js web --stop     # 仅停止 Web，不影响网关
 - **运行概览**：网关状态、在途请求、历史趋势、请求明细，以及各 provider 和模型的 tokens / USD 消耗。可按时间和站点筛选，网关停止时仍可查看历史账本。费用使用统一模型 API 单价，不是站点账户余额；未上报用量和缺失价格单独标记。
 - **请求日志**：stdout / stderr 切换、关键词和异常筛选、暂停刷新，以及下载当前可见日志。读取文件末尾的有界窗口，不加载无限增长的整份日志。
 - **基础设置**：Provider 新增、编辑、删除、API Key 更新、模型映射、路由、默认站点、并发数、重试次数、超时和请求日志开关。已有 API Key 不回显，留空保留原值；模型价格（原价）与各站点的逐项价格倍率也可在此编辑；未展示的代理和请求头保持不变。
-- **保存与生效**：保存前校验完整配置并备份，使用版本校验防止覆盖其他窗口或手动编辑。模型价格与 provider 倍率保存后主动通知网关热更新，并显示是否已确认生效；其他修改仍需重启。保存不自动重启，有在途请求时拒绝重启。JSON 顶层 `logRequests`（布尔值）存在时优先于 `GATEWAY_LOG_REQUESTS`，未设置时保留原有环境变量行为。
+- **保存与生效**：保存前校验完整配置并备份，使用版本校验防止覆盖其他窗口或手动编辑。保存后主动通知网关原子切换配置，新请求立即使用新设置，进行中的请求继续使用原路由、密钥与计价快照；并发上调释放新增容量，下调等待现有请求完成。失败时保留最后有效的运行配置，界面区分文件已保存与运行配置已生效。保存不自动重启。JSON 顶层 `logRequests` 优先于 `GATEWAY_LOG_REQUESTS`。
 - **本机认证**：`web` 命令使用 URL fragment 完成本地登录，页面随即移除凭据并使用 HttpOnly 会话 cookie。管理 API 校验 Host、Origin 和会话，不向浏览器返回上游密钥。登录失效时重新执行 `node scripts/gw.js web`。不要分享 `logs/web-session.json`，它包含管理页面的本地登录凭据。
 
 管理 Web 与网关进程独立，重启或停止网关后页面仍然可用。Web 自身的输出在 `logs/web.out.log` / `logs/web.err.log`；更新管理 Web 源码后执行 `web --stop` 再执行 `web`，不会中断模型请求。
+
+### 子代理编排
+
+管理台的子代理编排视图支持切换 Claude Code / Codex，通过接线板查看模型绑定，并编辑名称、作用、提示词、工具权限及 Codex 推理力度和沙箱。支持全局默认模型、内置角色接管和恢复；不扫描其他项目目录。
+
+- Claude Code：读取 `CLAUDE_CONFIG_DIR` 或 `~/.claude` 下的 `agents/*.md`，采用 YAML frontmatter 和 Markdown 正文。全局默认只修改同目录 `settings.json` 的 `env.CLAUDE_CODE_SUBAGENT_MODEL`。
+- Codex：读取 `CODEX_HOME` 或 `~/.codex` 下的 `agents/*.toml`。全局默认只修改 `config.toml` 中 `[agents]` 的 `default_subagent_model` 和 `default_subagent_reasoning_effort`，不改主会话模型或凭据。
+- 候选来自网关路由和提供商模型映射。“检测模型”通过本机网关发送少量真实请求，会产生费用；Claude Code 使用 Messages，Codex 使用 Responses。只有检测通过的线路可作为新选择，失效的旧模型仍保留供查看和编辑其他字段。结果保存在管理状态目录的 `subagent-model-checks.json`，24 小时后或配置变化后需要重新检测；实测通过不代表上游永远可用。
+- Claude 的“未指定”与 `inherit` 分开处理；`opus` / `sonnet` / `haiku` 由客户端解析，不作为可直接绑定的网关线路。Codex 的继承通过移除配置项实现。客户端调用参数、环境变量和会话覆盖仍可能影响最终模型。
+- 保存使用文件版本检查、备份和同目录临时文件原子替换，保留未知字段与无关配置。备份位于 `logs/config-backups`。拒绝越界路径、链接和重名覆盖；损坏文件显示错误，不强制修复。恢复内置默认会备份并移除用户覆盖文件，不改客户端内置代码。
+- 写入成功只代表文件已保存，不代表运行中的客户端已重新加载。必要时新建会话或重启客户端；管理台不会自动重启客户端或网关。
+
+配置编辑使用 `yaml` 和 `toml-eslint-parser`，更新源码后先执行 `npm ci`。`npm run test:subagents` 使用临时目录与模拟上游，不修改本机代理文件，也不产生模型费用。
 
 ## 命令行日志
 
@@ -192,8 +206,8 @@ cp providers.example.json providers.json
 - 管理页保存后，网关校验磁盘上的目标版本，原子替换全局单价和各 provider 倍率。确认成功后的新请求立即使用新计价；无须等待其他用户完成请求，也不会清空用量统计或重置并发队列。
 - 每次请求在进入 `beginUsage()` 时锁定单价、倍率和计价版本，包括已进入并发排队的请求。流式响应、重试与请求结束记账均沿用这份快照，不会中途改价。账本新增 `pricingRevision`、`pricingEffectiveAt`，已完成账目不追溯重算。
 - 直接编辑 `providers.json` 也支持：目录监听约 200ms 防抖，另有 1 秒轮询兜底（受事件循环负载影响）。解析或计价校验失败时保留上一份有效计价，文件修复后自动恢复。手动编辑应使用临时文件加重命名，避免加载尚未完成的编辑内容。
-- 仅 `pricing` 和 `providers[].priceMultipliers` 热更新；地址、密钥、模型映射、路由、超时及并发限制保持启动配置。混合修改时计价可先应用，其余仍提示待重启；provider 新增或更名也必须重启。
-- `GET /v1/pricing-status`（普通网关鉴权）可核对运行版本、生效时间、错误和待重启状态。`POST /v1/reload-pricing` 仅允许本机专用管理凭据，普通客户端 token 无权触发；管理端自动通过配置文件同目录下 `logs/pricing-runtime-*.json` 中的实例凭据调用，凭据不能提交或分享。
+- 基础设置全部支持热更新：地址、密钥、协议、模型映射、路由、超时、并发限制、日志开关及价格。新增、删除或更名 provider 无需重启。完整配置校验成功后同步切换，非法配置不会部分生效。
+- `GET /v1/pricing-status`（普通网关鉴权）可核对配置版本、计价版本、生效时间和错误。`POST /v1/reload-config` 仅允许本机专用管理凭据，兼容旧端点 `/v1/reload-pricing`；普通客户端 token 无权触发。管理端通过配置文件同目录下 `logs/pricing-runtime-*.json` 中的实例凭据调用，凭据不能提交或分享。
 - 保存成功但网关离线、版本冲突或不支持热更新时，界面明确提示“已保存但未确认生效”，不会自动重启或回滚配置。首次部署此功能仍需在空闲时重启一次网关，并重新启动管理 Web 加载新代码；旧进程不会因为源码修改自动获得新能力。
 
 ### 3. 启动

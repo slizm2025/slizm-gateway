@@ -8,6 +8,8 @@ import { ROOT, env, loadConfig, redact } from '../config.js';
 import { buildOverview, buildSwitchboardLive, readLogTail } from './data.js';
 import { getSanitizedSettings, saveSettings } from './settings.js';
 import { reloadGatewayPricing } from '../runtime-pricing.js';
+import { createSubagentStore } from './subagents.js';
+import { createSubagentModels } from './subagent-models.js';
 
 const COOKIE_NAME = 'admin_session';
 const MAX_BODY_BYTES = 256 * 1024; // 256 KB
@@ -106,6 +108,12 @@ export function createAdminServer(options = {}) {
   const getGateway = options.getGateway;
   const sessionSecret = options.sessionSecret ?? randomBytes(32).toString('hex');
   const reloadPricing = options.reloadPricing ?? reloadGatewayPricing;
+  const subagentModels = createSubagentModels({ configPath, cachePath: join(stateDir, 'subagent-model-checks.json'), ...options.subagentModelOptions });
+  const subagents = createSubagentStore({
+    claudeHome: options.claudeHome, codexHome: options.codexHome, backupDir,
+    validateModel: subagentModels.validate,
+  });
+  const subagentData = async (tool) => ({ ...await subagents.get(tool), models: subagentModels.list(tool) });
 
   const sessions = new Map();
 
@@ -169,7 +177,7 @@ export function createAdminServer(options = {}) {
       });
     }
 
-    if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html' || pathname === '/app.js' || pathname === '/style.css')) {
+    if (req.method === 'GET' && ['/', '/index.html', '/app.js', '/subagents.js', '/style.css'].includes(pathname)) {
       const fileName = pathname === '/' || pathname === '/index.html' ? 'index.html' : pathname.slice(1);
       const filePath = resolve(publicDir, fileName);
       if (!filePath.startsWith(resolve(publicDir)) || !existsSync(filePath)) {
@@ -246,6 +254,37 @@ export function createAdminServer(options = {}) {
       if (!sessionExpiry || sessionExpiry < Date.now()) {
         if (currentToken) sessions.delete(currentToken);
         return errorResponse(res, 401, 'Unauthorized');
+      }
+
+      if (pathname === '/api/subagents' || pathname.startsWith('/api/subagents/')) {
+        try {
+          if (req.method === 'GET' && pathname === '/api/subagents') {
+            return jsonResponse(res, 200, await subagentData(parsedUrl.searchParams.get('tool') || 'claude'));
+          }
+          const match = /^\/api\/subagents\/(claude|codex)\/([^/]+)$/.exec(pathname);
+          if (!match || !['PUT', 'DELETE', 'POST'].includes(req.method)) {
+            return errorResponse(res, 404, 'Subagent endpoint not found');
+          }
+          if (!(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+            return errorResponse(res, 415, 'Content-Type 必须是 application/json');
+          }
+          const [, tool, encodedId] = match;
+          let id;
+          try { id = decodeURIComponent(encodedId); } catch { return errorResponse(res, 400, '无效的代理 ID'); }
+          const body = await readJsonBody(req, res, MAX_BODY_BYTES);
+          if (id === 'check-models' && req.method === 'POST') {
+            await subagentModels.check(tool);
+          } else if (id === 'defaults' && req.method === 'PUT') {
+            await subagents.saveDefaults(tool, body);
+          } else if (!['defaults', 'check-models'].includes(id) && req.method === 'PUT') {
+            await subagents.save(tool, id, body);
+          } else if (!['defaults', 'check-models'].includes(id) && req.method === 'DELETE') {
+            await subagents.restore(tool, id, body);
+          } else return errorResponse(res, 405, '不支持此操作');
+          return jsonResponse(res, 200, await subagentData(tool));
+        } catch (error) {
+          return errorResponse(res, error.statusCode || 500, error.message);
+        }
       }
 
       if (req.method === 'GET' && pathname === '/api/overview') {

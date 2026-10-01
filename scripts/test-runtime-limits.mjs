@@ -1,0 +1,53 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { gateFor, configureProviderLimits } from '../src/limiter.js';
+
+test('live limits grow immediately and shrink without interrupting active requests', async () => {
+  const provider = { name: 'live-limits', maxConcurrency: 1 };
+  const configure = (maxConcurrency) => configureProviderLimits(new Map([[provider.name, { ...provider, maxConcurrency }]]));
+  const gate = gateFor(provider);
+  await gate.acquire();
+  let admitted = false;
+  const queued = gate.acquire().then(() => { admitted = true; });
+  configure(2);
+  await queued;
+  assert.equal(admitted, true);
+  assert.equal(gate.active, 2);
+  assert.equal(gateFor(provider).limit, 2, 'old provider snapshots cannot reset the new limit');
+  configure(1);
+  let next = false;
+  const waiting = gate.acquire().then(() => { next = true; });
+  gate.release();
+  await Promise.resolve();
+  assert.equal(next, false);
+  gate.release();
+  await waiting;
+  assert.equal(gate.active, 1);
+  gate.release();
+  assert.equal(gate.active, 0);
+});
+
+test('live limits preserve FIFO and remove aborted waiters', async () => {
+  const provider = { name: 'live-fifo', maxConcurrency: 1 };
+  const gate = gateFor(provider);
+  await gate.acquire();
+  const order = [];
+  const controller = new AbortController();
+  const aborted = gate.acquire(controller.signal);
+  const rejected = assert.rejects(aborted, { name: 'AbortError' });
+  const first = gate.acquire().then(() => order.push(1));
+  const second = gate.acquire().then(() => order.push(2));
+  controller.abort();
+  await rejected;
+  configureProviderLimits(new Map([[provider.name, { ...provider, maxConcurrency: 2 }]]));
+  await first;
+  assert.deepEqual(order, [1]);
+  gate.release();
+  await second;
+  assert.deepEqual(order, [1, 2]);
+  configureProviderLimits(new Map());
+  assert.equal(gateFor(provider), gate, 'removed providers retain active admission accounting');
+  gate.release();
+  gate.release();
+  assert.equal(gate.active, 0);
+});

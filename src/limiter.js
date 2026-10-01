@@ -59,10 +59,27 @@ class Gate {
   }
 
   release() {
-    // 令牌直接交给最早的等待者，不能先减 active 留出抢占窗口。
-    const next = this.waiters.shift();
-    if (next) next();
-    else this.active--;
+    this.active--;
+    this.drain();
+  }
+
+  drain() {
+    while (this.active < this.limit && this.waiters.length) {
+      this.active++;
+      this.waiters.shift()();
+    }
+  }
+}
+
+// Retain gates across reloads so old requests cannot reset current admission limits.
+export function configureProviderLimits(providers) {
+  for (const provider of providers.values()) {
+    const gate = gateFor(provider);
+    gate.limit = provider.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+    gate.drain();
+  }
+  for (const [name, gate] of gates) {
+    if (!providers.has(name) && !gate.active && !gate.waiters.length) gates.delete(name);
   }
 }
 

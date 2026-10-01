@@ -9,6 +9,7 @@ import { ROOT, env, redact } from './config.js';
 import { calculateCostUsd, modelPrice } from './pricing.js';
 
 const MAX_RECENT = 200;
+const SWITCHBOARD_RETAINED_TTL_MS = 5 * 60 * 1000;
 const startedAt = new Date().toISOString();
 const totals = bucket();
 const providers = new Map();
@@ -16,6 +17,47 @@ const routes = new Map();
 const models = new Map();
 const inflight = new Set();
 const recent = [];
+const switchboardRetained = new Map();
+
+function switchboardTopologyKey(item) {
+  return JSON.stringify([
+    item.provider ?? null,
+    item.model ?? null,
+    item.clientType ?? null,
+    item.inputProtocol ?? null,
+    item.upstreamProtocol ?? null,
+    item.adapter ?? null,
+    item.route ?? null,
+  ]);
+}
+
+function pruneSwitchboardRetained(nowMs) {
+  for (const [key, item] of switchboardRetained) {
+    if (nowMs - Date.parse(item.finishedAt) > SWITCHBOARD_RETAINED_TTL_MS) {
+      switchboardRetained.delete(key);
+    }
+  }
+}
+
+function retainSwitchboardTopology(item) {
+  const finishedAtMs = Date.parse(item.time);
+  pruneSwitchboardRetained(finishedAtMs);
+  const retained = {
+    route: item.route,
+    provider: item.provider,
+    model: item.model,
+    clientType: item.clientType,
+    inputProtocol: item.inputProtocol,
+    upstreamProtocol: item.upstreamProtocol,
+    adapter: item.adapter,
+    finishedAt: item.time,
+  };
+  const key = switchboardTopologyKey(retained);
+  const previous = switchboardRetained.get(key);
+  if (!previous || Date.parse(previous.finishedAt) < finishedAtMs) {
+    switchboardRetained.set(key, retained);
+  }
+}
 
 function bucket() {
   return {
@@ -180,6 +222,7 @@ export function finishUsage(entry, { status = 500, usage, error } = {}) {
     cacheWriteTokens: u?.cacheWrite ?? 0,
     estimatedInputTokens: entry.estimatedInputTokens,
   };
+  retainSwitchboardTopology(item);
   // baseCostUsd 为全局模型原价；costUsd 为按站点逐项倍率（输入/缓存读/缓存写/输出）计算的实际费用
   item.baseCostUsd = u ? calculateCostUsd(u, entry.pricing, entry.model) : null;
   if (entry.priceMultiplier) item.priceMultiplier = entry.priceMultiplier;
@@ -212,12 +255,14 @@ export function finishUsage(entry, { status = 500, usage, error } = {}) {
   return item;
 }
 
-export function usageStats({ activeRequests = 0 } = {}) {
+export function usageStats({ activeRequests = inflight.size } = {}) {
   const now = performance.now();
+  const wallNow = Date.now();
+  pruneSwitchboardRetained(wallNow);
   const dir = usageLedgerDir();
   return {
     startedAt,
-    generatedAt: new Date().toISOString(),
+    generatedAt: new Date(wallNow).toISOString(),
     activeRequests,
     ledger: dir ? ledgerFile(dir) : null,
     totals: { ...totals },
@@ -242,6 +287,7 @@ export function usageStats({ activeRequests = 0 } = {}) {
       contextTokens: e.usage ? (e.usage.input ?? 0) + (e.usage.cacheRead ?? 0) + (e.usage.cacheWrite ?? 0) : undefined,
       outputTokens: e.usage?.output,
     })),
+    switchboardRetained: [...switchboardRetained.values()].map((item) => ({ ...item })),
     recent: recent.slice(),
   };
 }

@@ -1,4 +1,4 @@
-// Pricing is replaceable; routing, credentials and admission remain startup configuration.
+// An optional synchronous commit switches validated gateway configuration with pricing.
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, watch } from 'node:fs';
 import { dirname, basename, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -88,7 +88,7 @@ export function publishPricingControl({ configPath, port, host, instanceId, toke
 export async function reloadGatewayPricing({ configPath, expectedRevision }) {
   let state;
   try { state = JSON.parse(readFileSync(pricingControlPath(configPath), 'utf8')); }
-  catch { throw problem('运行中网关不支持计价热更新或尚未启动；首次部署需重启一次', 'UNSUPPORTED', 503); }
+  catch { throw problem('运行中网关不支持配置热更新或尚未启动；首次部署需重启一次', 'UNSUPPORTED', 503); }
   let base;
   try { base = new URL(state.baseUrl); } catch { throw problem('Invalid pricing control state', 'OFFLINE', 503); }
   if (base.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(base.hostname) || !base.port ||
@@ -102,7 +102,7 @@ export async function reloadGatewayPricing({ configPath, expectedRevision }) {
       throw problem('Gateway instance changed; reload was not confirmed', 'OFFLINE', 503);
     }
     if (!info.pricingReload) throw problem('网关尚不支持热更新，首次部署需重启一次', 'UNSUPPORTED', 503);
-    const response = await fetch(new URL('/v1/reload-pricing', base), {
+    const response = await fetch(new URL(info.configReload ? '/v1/reload-config' : '/v1/reload-pricing', base), {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000),
       headers: { 'content-type': 'application/json', 'x-gateway-pricing-token': state.token },
       body: JSON.stringify({ expectedRevision }),
@@ -114,11 +114,11 @@ export async function reloadGatewayPricing({ configPath, expectedRevision }) {
     return result;
   } catch (error) {
     if (error.code && error.statusCode) throw error;
-    throw problem('无法确认网关计价已生效；请检查网关状态并重试', 'OFFLINE', 503);
+    throw problem('无法确认网关配置已生效；请检查网关状态并重试', 'OFFLINE', 503);
   }
 }
 
-export function createRuntimePricing({ configPath, initialContent, onError = () => {} }) {
+export function createRuntimePricing({ configPath, initialContent, onError = () => {}, prepareConfig }) {
   const initial = parse(initialContent);
   const providerNames = Object.keys(initial.multipliers);
   let snapshot = freeze({ pricing: initial.pricing, multipliers: initial.multipliers });
@@ -138,19 +138,22 @@ export function createRuntimePricing({ configPath, initialContent, onError = () 
         throw problem('Configuration changed after saving; refresh and retry', 'REVISION_CONFLICT', 409);
       }
       const next = parse(content);
-      // Removed/renamed providers still serve using startup routes until restart.
-      const multipliers = Object.fromEntries(providerNames.map((name) => [name,
+      const commitConfig = prepareConfig?.(next.raw);
+      // Legacy pricing-only consumers retain startup providers; full reload replaces them.
+      const multipliers = prepareConfig ? next.multipliers : Object.fromEntries(providerNames.map((name) => [name,
         Object.hasOwn(next.multipliers, name) ? next.multipliers[name] : snapshot.multipliers[name],
       ]));
       const candidate = freeze({ pricing: next.pricing, multipliers });
       const nextPricingRevision = hash(canonical(candidate));
+      commitConfig?.();
       if (nextPricingRevision !== pricingRevision) {
         snapshot = candidate;
         pricingRevision = nextPricingRevision;
         effectiveAt = new Date().toISOString();
       }
+      if (prepareConfig && revision !== nextRevision) effectiveAt = new Date().toISOString();
       revision = nextRevision;
-      restartRequired = pricingChangeRequiresRestart(initial.raw, next.raw);
+      restartRequired = !prepareConfig && pricingChangeRequiresRestart(initial.raw, next.raw);
       lastReloadError = null;
       lastAttempt = nextRevision;
       return { reloadApplied: true, ...status() };
@@ -194,6 +197,14 @@ export function createRuntimePricing({ configPath, initialContent, onError = () 
   }
   return {
     reload, status, startWatching,
+    captureContext() {
+      const current = snapshot;
+      const currentRevision = pricingRevision;
+      const currentEffectiveAt = effectiveAt;
+      return (provider, model) => ({ pricing: current.pricing,
+        priceMultiplier: freeze(resolveMultiplier(current.multipliers[provider], model)),
+        pricingRevision: currentRevision, pricingEffectiveAt: currentEffectiveAt });
+    },
     capture(provider, model) {
       return { pricing: snapshot.pricing,
         priceMultiplier: freeze(resolveMultiplier(snapshot.multipliers[provider], model)),

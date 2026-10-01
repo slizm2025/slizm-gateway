@@ -70,6 +70,9 @@ test('live and overview preserve gateway snapshot sampledAt, instanceId/startedA
       { requestId: 'req-1', provider: 'test-prov', requestStartedAt: '2026-09-28T02:59:50.000Z', elapsedMs: 10000 },
       { requestId: 'req-2', provider: 'test-prov', requestStartedAt: '2026-09-28T02:59:55.000Z', elapsedMs: 5000 },
     ],
+    switchboardRetained: [
+      { provider: 'test-prov', model: 'done-model', clientType: 'codex', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct', finishedAt: '2026-09-28T02:59:00.000Z' },
+    ],
   };
   const getGateway = async () => ({
     online: true,
@@ -86,6 +89,7 @@ test('live and overview preserve gateway snapshot sampledAt, instanceId/startedA
   assert.equal(live.instanceId, 'inst-abc-123');
   assert.equal(live.startedAt, '2026-09-28T00:00:00.000Z');
   assert.equal(live.activeRequests, 2, 'activeRequests 应优先取 stats.activeRequests 而非 health 的旧值 999');
+  assert.deepEqual(live.switchboardRetained, gwStats.switchboardRetained);
 
   const overview = await buildOverview({ cfg, ledgerDir: null, period: 'today', getGateway });
   assert.equal(overview.sampledAt, '2026-09-28T03:00:00.000Z', 'overview.sampledAt 必须优先采用 gw.stats.generatedAt');
@@ -93,6 +97,7 @@ test('live and overview preserve gateway snapshot sampledAt, instanceId/startedA
   assert.equal(overview.gateway.instanceId, 'inst-abc-123');
   assert.equal(overview.gateway.startedAt, '2026-09-28T00:00:00.000Z');
   assert.equal(overview.gateway.activeRequests, 2, 'overview gateway activeRequests 应优先取 stats.activeRequests');
+  assert.deepEqual(overview.switchboardRetained, gwStats.switchboardRetained, '两个端点透传同一份网关 sticky 拓扑');
 });
 
 test('provider 过滤与 live 载荷隔离：按 provider 过滤在途与配置，且无 stats 时优雅降级', async () => {
@@ -115,6 +120,10 @@ test('provider 过滤与 live 载荷隔离：按 provider 过滤在途与配置�
       { requestId: 'req-ant', provider: 'anthropic', model: 'claude-sonnet-4-6', requestStartedAt: '2026-09-28T04:59:50.000Z', elapsedMs: 10000 },
       { requestId: 'req-oai', provider: 'openai', model: 'gpt-4o', requestStartedAt: '2026-09-28T04:59:55.000Z', elapsedMs: 5000 },
     ],
+    switchboardRetained: [
+      { provider: 'anthropic', model: 'claude-sonnet-4-6', finishedAt: '2026-09-28T04:58:00.000Z' },
+      { provider: 'openai', model: 'gpt-4o', finishedAt: '2026-09-28T04:58:30.000Z' },
+    ],
   };
 
   const getGateway = async () => ({
@@ -130,7 +139,9 @@ test('provider 过滤与 live 载荷隔离：按 provider 过滤在途与配置�
   assert.equal(liveAnt.switchboardActive.length, 1);
   assert.equal(liveAnt.switchboardActive[0].requestId, 'req-ant');
   assert.equal(liveAnt.switchboardActive[0].provider, 'anthropic');
+  assert.equal(liveAnt.switchboardActiveRequests, 1, 'provider 过滤后的交换台活动数必须与 switchboardActive 一致');
   assert.ok(liveAnt.switchboardConfigured.every((item) => item.provider === 'anthropic'));
+  assert.deepEqual(liveAnt.switchboardRetained.map((item) => item.provider), ['anthropic']);
 
   // 2. 指定 provider='openai' 时，仅保留 openai
   const liveOai = await buildSwitchboardLive({ cfg, provider: 'openai', getGateway });
@@ -138,6 +149,10 @@ test('provider 过滤与 live 载荷隔离：按 provider 过滤在途与配置�
   assert.equal(liveOai.switchboardActive[0].requestId, 'req-oai');
   assert.equal(liveOai.switchboardActive[0].provider, 'openai');
   assert.ok(liveOai.switchboardConfigured.every((item) => item.provider === 'openai'));
+  assert.deepEqual(liveOai.switchboardRetained.map((item) => item.provider), ['openai']);
+
+  const offline = await buildSwitchboardLive({ cfg, getGateway: async () => ({ online: false, stats: gwStats }) });
+  assert.deepEqual(offline.switchboardRetained, [], '离线网关不保留 sticky 拓扑');
 });
 
 test('真实 HTTP 服务下 fetchGatewayStatus 的健康与用量拉取优先级与回退', async () => {
