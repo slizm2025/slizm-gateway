@@ -1,0 +1,35 @@
+[Unit]
+Description=Slizm Gateway Local Web Admin (Loopback Only)
+After=network-online.target slizm-gateway.service
+Wants=slizm-gateway.service
+
+[Service]
+Type=simple
+# 警告：管理 Web 仅允许本机 127.0.0.1 监听，严禁直接通过 Nginx/Caddy 反代到公网！
+# 远程访问请使用 SSH 端口转发：ssh -N -L 48731:127.0.0.1:48731 user@your-dedi
+User=slizm
+Group=slizm
+WorkingDirectory=/opt/slizm-gateway
+ExecStart=/usr/bin/node /opt/slizm-gateway/src/admin/server.js
+
+Environment=NODE_ENV=production
+Environment=TZ=Asia/Shanghai
+Environment=GATEWAY_HOST=127.0.0.1
+Environment=GATEWAY_PORT=4000
+Environment=GATEWAY_WEB_PORT=48731
+Environment=GATEWAY_USAGE_DIR=/opt/slizm-gateway/logs
+
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slizm-gateway-web
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

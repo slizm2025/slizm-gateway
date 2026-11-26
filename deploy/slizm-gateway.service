@@ -1,0 +1,39 @@
+[Unit]
+Description=Slizm Gateway (Unified LLM API Proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 请替换为服务器上的实际非 root 运行用户和代码路径
+User=slizm
+Group=slizm
+WorkingDirectory=/opt/slizm-gateway
+ExecStart=/usr/bin/node /opt/slizm-gateway/src/server.js
+
+Environment=NODE_ENV=production
+Environment=TZ=Asia/Shanghai
+Environment=GATEWAY_HOST=127.0.0.1
+Environment=GATEWAY_PORT=4000
+# 强制校验至少 24 位随机 clientToken，防止误用示例默认密钥
+Environment=GATEWAY_REQUIRE_STRONG_TOKEN=1
+# 优雅停机排空时长（毫秒），需小于下方 TimeoutStopSec
+Environment=GATEWAY_SHUTDOWN_TIMEOUT_MS=60000
+# 显式指定账本目录（即使使用外部 GATEWAY_CONFIG 也不会关闭用量记录）
+Environment=GATEWAY_USAGE_DIR=/opt/slizm-gateway/logs
+
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=75
+LimitNOFILE=65536
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slizm-gateway
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

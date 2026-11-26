@@ -1,0 +1,30 @@
+# 将 gw.example.com 替换为你的实际域名（DNS A/AAAA 记录指向本 dedi 服务器）
+# 若使用 Cloudflare Proxy（橙色云朵），请确保 SSL/TLS 模式为 Full (strict)，
+# 且注意 Cloudflare 免费版单次长连接空闲 100s 超时可能影响超慢首字推理——建议直接灰色云朵（DNS Only）由 Caddy 自动签发 Let's Encrypt 证书。
+
+gw.example.com {
+	# 与网关 readBody 的 64MiB 上限保持一致
+	request_body {
+		max_size 64MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:4000 {
+		# 立即刷新 SSE 流式分片，避免反代缓冲导致首字延迟
+		flush_interval -1
+
+		transport http {
+			dial_timeout 10s
+			# 略大于网关默认 requestTimeoutMs（600s），避免长推理/思考流被反代提前切断
+			response_header_timeout 11m
+			read_timeout 12m
+			write_timeout 12m
+			keepalive 60s
+		}
+	}
+}

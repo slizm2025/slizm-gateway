@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { loadConfig, redact, missingSecretRefs, ROOT, env } from './config.js';
+import { loadConfig, redact, missingSecretRefs, isWeakClientToken, ROOT, env } from './config.js';
 import { upstreamFetch, readResponseText } from './upstream-fetch.js';
 import * as anthropic from './providers/anthropic.js';
 import * as openai from './providers/openai.js';
@@ -14,7 +14,7 @@ import * as messagesResponses from './providers/messages-to-responses.js';
 import { openAIToAnthropicStream, anthropicJsonToStream, convertJsonResponse, SSE_HEADERS } from './stream.js';
 import { withUpstream, gateStats, configureProviderLimits, networkErrorCode, isSafeToRetryNetworkError, isRetryableStatus, formatErrorMessage } from './limiter.js';
 import { modelSeries, messagesTransportFor, adaptBodyForModelSeries, adaptResponsesBodyForModelSeries } from './model-series.js';
-import { createRequestProfile, forwardEndToEndHeaders } from './providers/client-headers.js';
+import { createRequestProfile, forwardEndToEndHeaders, hasProxyForwardingHeaders } from './providers/client-headers.js';
 import { replaceResponseModel } from './providers/response-body.js';
 import { createSseDecoder } from './sse.js';
 import { createRuntimePricing, publishPricingControl } from './runtime-pricing.js';
@@ -182,6 +182,24 @@ function checkClientAuth(req) {
     req.headers['x-dsh-auth-token'] ?? '',
   ];
   return candidates.some((value) => { const b = Buffer.from(String(value)); return b.length === expected.length && timingSafeEqual(b, expected); });
+}
+function isLoopbackHostHeader(hostHeader) {
+  if (!hostHeader) return true;
+  const raw = String(hostHeader).trim().toLowerCase();
+  if (raw.startsWith('[')) {
+    const end = raw.indexOf(']');
+    if (end === -1) return false;
+    return raw.slice(0, end + 1) === '[::1]';
+  }
+  const hostname = raw.split(':')[0];
+  return hostname === '127.0.0.1' || hostname === 'localhost';
+}
+/** 仅本机直连（无反代转发头、来源为回环、Host 为本机）才允许未鉴权查看详细健康拓扑。 */
+function isDirectLocalRequest(req) {
+  const remote = req.socket?.remoteAddress;
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote)) return false;
+  if (hasProxyForwardingHeaders(req.headers)) return false;
+  return isLoopbackHostHeader(req.headers.host);
 }
 function requestContext(res, timeoutMs) {
   const client = new AbortController();
@@ -387,7 +405,7 @@ async function handleMessages(req, res, body, requestId, rawBody) {
     const upstream = acquired.res;
     if (!upstream.ok) {
       const sample = createBodySample(64 * 1024);
-      const headers = forwardEndToEndHeaders(upstream.headers);
+      const headers = forwardEndToEndHeaders(upstream.headers, { stripProxyHeaders: false });
       // Preserve the existing protection against replay after uncertain delivery.
       if (!isRetryableStatus(upstream.status) && upstream.status >= 500) headers['x-should-retry'] = 'false';
       if (provider.apiType !== 'anthropic') {
@@ -407,7 +425,8 @@ async function handleMessages(req, res, body, requestId, rawBody) {
     }
     const contentType = upstream.headers.get('content-type') ?? 'application/json';
     if (provider.apiType === 'anthropic') {
-      const responseHeaders = forwardEndToEndHeaders(upstream.headers);
+      const responseHeaders = forwardEndToEndHeaders(upstream.headers, { stripProxyHeaders: false });
+      if (contentType.includes('event-stream')) responseHeaders['x-accel-buffering'] = 'no';
       res.writeHead(upstream.status, responseHeaders);
       if (contentType.includes('event-stream')) {
         const monitor = createSseMonitor((u) => recordStreamUsage(usage, u));
@@ -534,9 +553,12 @@ async function handleResponses(req, res, body, requestId, rawBody) {
     headersMs = Date.now() - t0;
     const upstream = acquired.res;
     if (directResponses) {
-      const monitor = createResponsesMonitor(upstream.headers.get('content-type') ?? '', (u) => recordStreamUsage(usage, u));
+      const contentType = upstream.headers.get('content-type') ?? '';
+      const monitor = createResponsesMonitor(contentType, (u) => recordStreamUsage(usage, u));
       const errorSample = upstream.ok ? undefined : createBodySample(64 * 1024);
-      res.writeHead(upstream.status, forwardEndToEndHeaders(upstream.headers));
+      const responseHeaders = forwardEndToEndHeaders(upstream.headers, { stripProxyHeaders: false });
+      if (contentType.includes('event-stream')) responseHeaders['x-accel-buffering'] = 'no';
+      res.writeHead(upstream.status, responseHeaders);
       let bytes = 0;
       let terminalSent = false;
       try {
@@ -569,7 +591,7 @@ async function handleResponses(req, res, body, requestId, rawBody) {
     }
     if (!upstream.ok) {
       const text = redact(await readResponseText(upstream, 4 * 1024 * 1024));
-      const headers = forwardEndToEndHeaders(upstream.headers);
+      const headers = forwardEndToEndHeaders(upstream.headers, { stripProxyHeaders: false });
       if (upstream.headers.get('x-should-retry') === 'false' || (!isRetryableStatus(upstream.status) && upstream.status >= 500)) headers['x-should-retry'] = 'false';
       headers['content-length'] = String(Buffer.byteLength(text));
       res.writeHead(upstream.status, headers);
@@ -656,6 +678,11 @@ async function routeRequest(req, res) {
   const cfg = currentConfig();
   const path = new URL(req.url, 'http://localhost').pathname.replace(/\/+$/, '') || '/';
   if (req.method === 'GET' && (path === '/health' || path === '/')) {
+    const detailed = checkClientAuth(req) || isDirectLocalRequest(req);
+    if (!detailed) {
+      if (path === '/health') return json(res, 200, { status: 'ok' });
+      return errorResponse(res, 404, `网关不支持的路由: ${req.method} ${path}`, 'not_found_error');
+    }
     return json(res, 200, {
       status: 'ok', service: 'slizm-gateway', pid: process.pid, instanceId, startedAt: new Date(startedAt).toISOString(), pricingReload: true, configReload: true,
       transport: 'node-http-connect-v2', uptimeSec: Math.round((Date.now() - startedAt) / 1000), activeRequests: activeHttpRequests,
@@ -717,6 +744,10 @@ const server = http.createServer((req, res) => {
     if (!res.writableEnded) res.destroy();
   });
 });
+// 反向代理（Caddy / Nginx）默认上游 keep-alive 通常为 60s，高于此值可避免复用半关闭连接触发偶发 502。
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 70_000;
+
 server.listen(cfg.server.port, cfg.server.host, () => {
   stopPricingWatch = runtimePricing.startWatching();
   try {
@@ -724,6 +755,9 @@ server.listen(cfg.server.port, cfg.server.host, () => {
       host: server.address().address, instanceId, token: pricingControlToken });
   } catch (error) { print(null, `管理端计价重载凭据未发布（文件监听仍生效）: ${redact(error.message)}`, console.error); }
   print(null, `网关已启动 http://${cfg.server.host}:${server.address().port} · pid ${process.pid} · ${cfg.routes.size} 条路由 · node-http-connect-v2`);
+  if (isWeakClientToken(cfg.server.clientToken)) {
+    print(null, '警告: 当前 clientToken 较弱或为默认值，请勿直接暴露到局域网或公网（远程部署请设置 >=24 位随机密钥并开启 GATEWAY_REQUIRE_STRONG_TOKEN=1）');
+  }
   // 路由按 provider 汇总，一个 provider 一行
   const byProvider = new Map();
   for (const [alias, target] of cfg.routes) {
@@ -741,12 +775,20 @@ server.on('error', (e) => {
   print(null, e.code === 'EADDRINUSE' ? `端口 ${cfg.server.port} 已被占用` : `网关启动失败: ${e.message}`, console.error);
   process.exit(1);
 });
+let shuttingDown = false;
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   stopPricingWatch?.();
   removePricingControl?.();
-  print(null, `收到 ${sig}，关闭网关…`);
+  const timeoutMs = currentConfig().server.shutdownTimeoutMs;
+  print(null, `收到 ${sig}，正在排空 ${activeHttpRequests} 个在途请求（最长等待 ${fmtMs(timeoutMs)}）…`);
   server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000).unref();
+  server.closeIdleConnections?.();
+  setTimeout(() => {
+    print(null, `优雅关闭超时（仍有 ${activeHttpRequests} 个在途请求），强制退出`, console.error);
+    process.exit(0);
+  }, timeoutMs).unref();
 });
 process.on('unhandledRejection', (e) => console.error(`[${stamp()}] 未处理的异步异常:`, redact(String(e?.stack ?? e))));
 process.on('exit', () => { stopPricingWatch?.(); removePricingControl?.(); });

@@ -79,7 +79,8 @@ function atomicWrite(path, content) {
 
 const HOST = readEnvValue('GATEWAY_HOST', '127.0.0.1');
 const PORT = Number(readEnvValue('GATEWAY_PORT', '4000'));
-const BASE = `http://${HOST}:${PORT}`;
+const CONNECT_HOST = HOST === '0.0.0.0' ? '127.0.0.1' : HOST === '::' ? '::1' : HOST;
+const BASE = `http://${CONNECT_HOST.includes(':') && !CONNECT_HOST.startsWith('[') ? `[${CONNECT_HOST}]` : CONNECT_HOST}:${PORT}`;
 
 function webEnabled() {
   return readEnvValue('GATEWAY_WEB_ENABLED', '1') !== '0';
@@ -285,7 +286,7 @@ async function cmdStart({ manageWeb = true, strictWeb = false } = {}) {
       if (!process.exitCode && manageWeb) await startManagementWeb({ strict: strictWeb });
       return;
     }
-    if (await portInUse(HOST, PORT)) {
+    if (await portInUse(CONNECT_HOST, PORT)) {
       console.log(paint(C.red, `端口 ${PORT} 已被其他服务占用。`));
       process.exitCode = 1;
       return;
@@ -293,7 +294,7 @@ async function cmdStart({ manageWeb = true, strictWeb = false } = {}) {
     rmSync(PID_FILE, { force: true });
     console.log(paint(C.yellow, `已清理失效的 pid 文件 (${existing})，继续启动。`));
   }
-  if (await portInUse(HOST, PORT)) {
+  if (await portInUse(CONNECT_HOST, PORT)) {
     console.log(
       paint(C.red, `端口 ${PORT} 已被占用，但不是本管理器启动的进程。`),
     );
@@ -475,7 +476,7 @@ async function cmdStop() {
   const pid = readPid();
   if (!pid) {
     if (existsSync(PID_FILE)) rmSync(PID_FILE, { force: true });
-    if (await portInUse(HOST, PORT)) {
+    if (await portInUse(CONNECT_HOST, PORT)) {
       console.log(
         paint(C.yellow, `没有记录在案的 pid，但端口 ${PORT} 仍在监听（可能是别的方式启动的）。`),
       );
@@ -529,7 +530,7 @@ async function cmdRestart() {
       return;
     }
   }
-  for (let n = 0; n < 40 && await portInUse(HOST, PORT); n++) await new Promise((r) => setTimeout(r, 100));
+  for (let n = 0; n < 40 && await portInUse(CONNECT_HOST, PORT); n++) await new Promise((r) => setTimeout(r, 100));
   await cmdStart({ strictWeb: restartWeb });
 }
 

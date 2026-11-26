@@ -80,13 +80,34 @@ function urlValue(value, label, proxy = false) {
   if (proxy && parsed.pathname !== '/') throw new Error(`${label} 不得带路径`);
   return value.replace(/\/+$/, '');
 }
+const WEAK_CLIENT_TOKENS = new Set(['sk-local-gateway', 'sk-local-gateway-change-me']);
+const MIN_STRONG_TOKEN_LENGTH = 24;
+
+export function isLoopbackHost(host) {
+  const raw = String(host ?? '').trim().toLowerCase();
+  return raw === '127.0.0.1' || raw === 'localhost' || raw === '::1' || raw === '[::1]';
+}
+
+export function isWeakClientToken(token) {
+  const value = String(token ?? '').trim();
+  return !value || WEAK_CLIENT_TOKENS.has(value) || value.length < MIN_STRONG_TOKEN_LENGTH;
+}
+
 export function loadConfig(opts = {}) {
   missingSecrets.length = 0;
   const cfg = record(opts.raw ?? readJson(opts.configPath ?? env('GATEWAY_CONFIG', join(ROOT, 'providers.json'))), '配置');
+  const host = env('GATEWAY_HOST', '127.0.0.1');
+  const configuredToken = resolveSecret(cfg.clientToken) ?? env('GATEWAY_CLIENT_TOKEN');
+  const requireStrongToken = String(env('GATEWAY_REQUIRE_STRONG_TOKEN', '0')) === '1' || !isLoopbackHost(host);
+  if (requireStrongToken && isWeakClientToken(configuredToken)) {
+    throw new Error(`非本机监听或开启强 Token 校验时，必须配置至少 ${MIN_STRONG_TOKEN_LENGTH} 位随机 clientToken（不能留空或使用默认示例值）`);
+  }
   const server = {
-    host: env('GATEWAY_HOST', '127.0.0.1'),
+    host,
     port: integer(env('GATEWAY_PORT', '4000'), 4000, 'GATEWAY_PORT', 65535, 0),
-    clientToken: remember(resolveSecret(cfg.clientToken) ?? 'sk-local-gateway'),
+    clientToken: remember(configuredToken ?? 'sk-local-gateway'),
+    requireStrongToken,
+    shutdownTimeoutMs: integer(env('GATEWAY_SHUTDOWN_TIMEOUT_MS', '30000'), 30000, 'GATEWAY_SHUTDOWN_TIMEOUT_MS', 600000, 100),
     logRequests: typeof cfg.logRequests === 'boolean' ? cfg.logRequests : String(env('GATEWAY_LOG_REQUESTS', '1')) !== '0',
   };
   if (!Array.isArray(cfg.providers)) throw new Error('providers 必须是数组');

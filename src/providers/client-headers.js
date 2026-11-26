@@ -16,13 +16,31 @@ const DROP_HEADERS = new Set([
   'x-dsh-auth-token',
 ]);
 
-export function forwardEndToEndHeaders(incoming = {}) {
+// 反向代理与 CDN（Caddy / Nginx / Cloudflare 等）注入的边界头不应透传给上游：
+// 既会暴露客户端真实 IP，也会在访问套了 Cloudflare 的上游时触发 cdn-loop 环路或 WAF 拦截。
+const PROXY_DROP_HEADERS = new Set([
+  'forwarded', 'via', 'x-real-ip', 'true-client-ip', 'x-client-ip',
+  'x-cluster-client-ip', 'cdn-loop', 'x-envoy-external-address',
+  'x-envoy-internal', 'x-amzn-trace-id',
+]);
+const PROXY_DROP_PREFIXES = ['x-forwarded-', 'cf-'];
+
+function isProxyHeader(lower) {
+  return PROXY_DROP_HEADERS.has(lower) || PROXY_DROP_PREFIXES.some((prefix) => lower.startsWith(prefix));
+}
+
+export function hasProxyForwardingHeaders(incoming = {}) {
+  const entries = incoming instanceof Headers ? [...incoming] : Object.entries(incoming);
+  return entries.some(([name, value]) => value !== undefined && value !== '' && isProxyHeader(name.toLowerCase()));
+}
+
+export function forwardEndToEndHeaders(incoming = {}, { stripProxyHeaders = true } = {}) {
   const entries = incoming instanceof Headers ? [...incoming] : Object.entries(incoming);
   const connection = entries.find(([k]) => k.toLowerCase() === 'connection')?.[1];
   const nominated = new Set(String(connection ?? '').toLowerCase().split(',').map((s) => s.trim()));
   return Object.fromEntries(entries.flatMap(([name, value]) => {
     const lower = name.toLowerCase();
-    return value === undefined || DROP_HEADERS.has(lower) || nominated.has(lower) ? []
+    return value === undefined || DROP_HEADERS.has(lower) || nominated.has(lower) || (stripProxyHeaders && isProxyHeader(lower)) ? []
       : [[lower, Array.isArray(value) ? value.join(', ') : value]];
   }));
 }

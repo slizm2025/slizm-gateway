@@ -1,0 +1,66 @@
+# Nginx + Cloudflare Origin 证书反代示例（适用于已有 Nginx 的 Linux 服务器）
+# 将 gw.example.com 替换为你的实际域名，并指向对应 TLS 证书路径
+
+upstream slizm_gateway_backend {
+    server 127.0.0.1:4100;
+    # 配合 src/server.js 的 keepAliveTimeout=65s（上游保活略大于此处 60s，避免半关闭竞态）
+    keepalive 32;
+    keepalive_timeout 60s;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name gw.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name gw.example.com;
+
+    # 替换为你的 Cloudflare Origin Certificate 或 Let's Encrypt 证书路径
+    ssl_certificate     /etc/nginx/ssl/origin.crt;
+    ssl_certificate_key /etc/nginx/ssl/origin.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Cloudflare 回源长连接与大请求头/大请求体加固，避免 408 / Error 520
+    keepalive_timeout 120s;
+    keepalive_requests 1000;
+    client_header_timeout 60s;
+    client_body_timeout 120s;
+    client_max_body_size 64m;
+    client_body_buffer_size 256k;
+    large_client_header_buffers 4 32k;
+    gzip off;
+
+    # 单独记录日志，方便排查
+    access_log /var/log/nginx/gateway.access.log;
+    error_log  /var/log/nginx/gateway.error.log warn;
+
+    # 仅允许 API 路径；管理台 48731 严禁暴露到公网
+    location / {
+        proxy_pass http://slizm_gateway_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $http_cf_connecting_ip;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+
+        # 响应 SSE 流式不缓冲，但保留请求体缓冲（proxy_request_buffering on），
+        # 避免 Cloudflare 回源 POST 在非缓冲模式下偶发 408 -> Error 520
+        proxy_buffering off;
+        proxy_request_buffering on;
+        proxy_cache off;
+
+        # 响应头缓冲区放宽到 32k，避免上游大响应头触发 upstream sent too big header
+        proxy_buffer_size 32k;
+        proxy_buffers 8 32k;
+
+        proxy_connect_timeout 15s;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
