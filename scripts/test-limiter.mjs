@@ -1,6 +1,6 @@
 // 验证 limiter：并发闸门 + 429/503 退避重试。
 // 用假上游注入故障，不碰真实网络。
-import { withUpstream, retryDelayMs, isRetryableStatus, gateStats } from '../src/limiter.js';
+import { withUpstream, retryDelayMs, isRetryableStatus, gateStats, extractCauseDetails, formatErrorMessage } from '../src/limiter.js';
 
 let pass = 0;
 let fail = 0;
@@ -297,6 +297,27 @@ console.log('  14. release 可重复调用且不会产生负令牌');
   result.release();
   result.release();
   check('重复释放仍保持 active=0', gateStats()[provider.name].active === 0);
+}
+console.log('─'.repeat(70));
+console.log('  15. 循环安全与多层 cause / AggregateError 提取');
+{
+  // 循环引用 cause
+  const c1 = new Error('outer error');
+  const c2 = new Error('inner error');
+  c1.cause = c2;
+  c2.cause = c1;
+  const cyclic = extractCauseDetails(c1);
+  check('循环引用安全不陷入死循环', cyclic.messages.length === 2 && cyclic.messages[0] === 'outer error' && cyclic.messages[1] === 'inner error');
+  check('格式化包含 outer 和 inner', formatErrorMessage(c1) === 'outer error: inner error');
+
+  // AggregateError 与嵌套 cause 组合
+  const subErr1 = Object.assign(new Error('sub1 connect failed'), { code: 'ECONNREFUSED' });
+  const subErr2 = Object.assign(new Error('sub2 dns failed'), { code: 'ENOTFOUND' });
+  const agg = new AggregateError([subErr1, subErr2], 'aggregate failure');
+  const topErr = new TypeError('fetch failed', { cause: agg });
+  const details = extractCauseDetails(topErr);
+  check('正确收集嵌套 codes', details.codes.includes('ECONNREFUSED') && details.codes.includes('ENOTFOUND'));
+  check('格式化保持消息链', formatErrorMessage(topErr) === 'fetch failed: aggregate failure: sub1 connect failed: sub2 dns failed');
 }
 
 console.log('═'.repeat(70));

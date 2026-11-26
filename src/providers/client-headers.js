@@ -2,14 +2,18 @@
 // 默认只转发真实入站请求中存在的值；Codex profile 则按真实 Codex 抓包
 // 生成动态请求 ID，不复用任何真实客户端凭据。
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac } from 'node:crypto';
 import { modelSeries } from '../model-series.js';
 
 const INSTALLATION_ID = process.env.CODEX_INSTALLATION_ID || randomUUID();
+const SESSION_SALT = randomUUID();
 const DROP_HEADERS = new Set([
   'host', 'connection', 'keep-alive', 'proxy-connection', 'proxy-authorization',
   'proxy-authenticate', 'transfer-encoding', 'te', 'trailer', 'upgrade',
   'content-length', 'content-encoding', 'expect', 'authorization', 'x-api-key',
+  // DeepSeek Harness 的账户凭据只对 DeepSeek 账户平台有效，等同于客户端凭据，
+  // 必须和 authorization / x-api-key 一样换成上游自己的 key，不能转发出去。
+  'x-dsh-auth-token',
 ]);
 
 export function forwardEndToEndHeaders(incoming = {}) {
@@ -39,31 +43,48 @@ function hasHeaderPrefix(incoming, prefix) {
   return [...new Headers(incoming).keys()].some((name) => name.startsWith(prefix));
 }
 
+// DeepSeek Harness 的请求指纹，取自实际在用的客户端
+// (@deepseek-ai/dsh-llm 0.2.0-rc.2 / @deepseek-ai/dsh-llm-deepseek 0.2.0-rc.2)：
+//   user-agent: deepseek-harness/<version> (+https://github.com/deepseek-ai/deepseek-harness)
+//   x-deepseek-harness-user-id: <匿名用户 ID>      —— 每个 Messages 请求都带
+//   x-deepseek-harness-session-id / x-deepseek-harness-compact: 1 —— 可选
+//   x-api-key（dsh-llm-deepseek-api-key）或 x-dsh-auth-token（dsh-llm-deepseek-account）
+// UA 的产品标识可以被白标部署改写，所以只把 UA 当作其中一条线索；
+// dsh-llm-deepseek 自带的 x-deepseek-harness-* 头才是稳定指纹。
+const HARNESS_USER_AGENT = /(?:^|[\s/])deepseek[-_ ]?harness(?:[/\s(]|$)/;
+const CLAUDE_CODE_USER_AGENT = /(?:^|[\s/])claude(?:-code|-cli)?(?:[/\s]|$)/;
+const CODEX_USER_AGENT = /(?:^|[\s/])codex(?:[/\s-]|$)/;
+
+/** 置信度最高的 DeepSeek Harness 线索：只有该客户端的适配器会发出这些头。 */
+function hasHarnessMarker(headers, incoming) {
+  const nonEmpty = (name) => Boolean((headers.get(name) ?? '').trim());
+  return hasHeaderPrefix(incoming, 'x-deepseek-harness-')
+    || nonEmpty('x-deepseek-harness')
+    || nonEmpty('x-dsh-auth-token')
+    || headers.get('x-client-name')?.toLowerCase() === 'deepseek-harness';
+}
+
 /** Identify the calling agent from its original request headers. */
 export function detectClient(incoming = {}) {
   const headers = new Headers(incoming);
   const ua = (headers.get('user-agent') ?? '').toLowerCase();
   const app = (headers.get('x-app') ?? '').toLowerCase();
 
+  // DeepSeek Harness 先判：它的专属头不可能出现在 Claude Code / Codex 上，
+  // 而它自己也可能同时带 Anthropic SDK 或 CLI 风格的头，不能被后面的通用规则抢走。
+  if (HARNESS_USER_AGENT.test(ua) || hasHarnessMarker(headers, incoming)) return 'deepseek-harness';
+
   if (
-    /(?:^|[\s/])claude(?:-code|-cli)?(?:[/\s]|$)/.test(ua)
+    CLAUDE_CODE_USER_AGENT.test(ua)
     || headers.has('x-claude-code-session-id')
     || (app === 'cli' && (headers.has('anthropic-version') || hasHeaderPrefix(incoming, 'x-stainless-')))
   ) return 'claude-code';
 
   if (
-    /(?:^|[\s/])codex(?:[/\s-]|$)/.test(ua)
+    CODEX_USER_AGENT.test(ua)
     || headers.has('originator')
     || hasHeaderPrefix(incoming, 'x-codex-')
   ) return 'codex';
-
-  if (
-    /deepseek[-_ ]?harness/.test(ua)
-    || headers.has('x-deepseek-harness')
-    || hasHeaderPrefix(incoming, 'x-deepseek-harness-')
-    || headers.get('x-client-name')?.toLowerCase() === 'deepseek-harness'
-    || hasHeaderPrefix(incoming, 'x-harness-')
-  ) return 'deepseek-harness';
 
   if (/deepseek/.test(ua) || hasHeaderPrefix(incoming, 'x-deepseek-')) return 'deepseek';
   return 'unknown';
@@ -84,8 +105,13 @@ export function resolveClientProfile(provider, targetModel, override, incoming =
 export function createRequestProfile(provider, targetModel, override, incoming = {}) {
   const clientType = detectClient(incoming);
   const clientProfile = resolveClientProfile(provider, targetModel, override, incoming);
+  const headers = new Headers(incoming);
+  const clientSession = clientType === 'claude-code' ? headers.get('x-claude-code-session-id')?.trim() : undefined;
+  const sessionId = clientSession ? createHmac('sha256', SESSION_SALT)
+    .update(JSON.stringify([provider.name ?? '', targetModel, headers.get('authorization'), headers.get('x-api-key'), clientSession]))
+    .digest('hex').slice(0, 32).replace(/^(\w{8})(\w{4})(\w{4})(\w{4})(\w{12})$/, '$1-$2-$3-$4-$5') : undefined;
   return { clientProfile, clientType, targetModel, ...(clientProfile === 'codex'
-    ? { codexContext: createCodexContext(targetModel, provider.codexReasoningEffort) } : {}) };
+    ? { codexContext: createCodexContext(targetModel, provider.codexReasoningEffort, sessionId) } : {}) };
 }
 
 function codexArch() {
@@ -93,9 +119,8 @@ function codexArch() {
 }
 
 // Header profile captured from Codex CLI 0.155.0-alpha.16.4 on Windows.
-// IDs are generated per request; live Codex session IDs are never copied.
-export function createCodexContext(model, reasoningEffort = 'high') {
-  const sessionId = randomUUID();
+// Session affinity uses an opaque client-scoped ID; turn IDs remain independent.
+export function createCodexContext(model, reasoningEffort = 'high', sessionId = randomUUID()) {
   const turnId = randomUUID();
   const contextWindowId = randomUUID();
   const startedAt = Date.now();
@@ -141,7 +166,7 @@ export function buildCodexHeaders(provider, context) {
     'x-codex-window-id': context.windowId,
     'x-codex-installation-id': context.installationId,
     'x-codex-turn-metadata': JSON.stringify(context.metadata),
-    'x-client-request-id': context.sessionId,
+    'x-client-request-id': context.turnId,
     'session-id': context.sessionId,
     'thread-id': context.sessionId,
   }, provider.extraHeaders);

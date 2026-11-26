@@ -195,6 +195,20 @@ async function renderPage(response, clock = Date, options = {}) {
   return get;
 }
 
+test('a plain page URL establishes a same-origin session before loading data', async () => {
+  const calls = [];
+  await renderPage(async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ gateway: { online: true }, total: {}, providers: [], models: [], recent: [], trend: [] }) };
+  });
+  assert.equal(calls[0].url, '/api/session');
+  assert.equal(calls[0].options.method, 'POST');
+  assert.equal(calls[0].options.credentials, 'same-origin');
+  assert.equal(calls[0].options.headers['Content-Type'], 'application/json');
+  assert.equal(calls[0].options.headers.Authorization, undefined);
+  assert.ok(calls.slice(1).some(({ url }) => url.startsWith('/api/overview')));
+});
+
 test('overview renders online status and gates restart while requests are active', async () => {
   let activeRequests = 2;
   const request = { requestId: 'req-overview', clientType: 'codex', provider: 'relay', model: 'actual', route: 'main', inputProtocol: 'responses', upstreamProtocol: 'responses', adapter: 'direct' };
@@ -343,6 +357,33 @@ test('overview formats USD to six places and abbreviates token counts without ch
   assert.equal(get('trend-tooltip-adjusted').textContent, '倍率后 $0.000002');
 });
 
+test('TPS readings distinguish consumption from output means and render unavailable values', async () => {
+  const get = await renderPage({
+    ok: true, status: 200,
+    json: async () => ({
+      gateway: { online: true }, providerNames: [], trend: [], inflight: [],
+      traffic: { tps: { current: 0, peak: 120.456, avg: 20 } },
+      total: { avgOutputTokensPerSec: 55, outputTpsSamples: 2 },
+      providers: [{ name: 'p', avgOutputTokensPerSec: 55, outputTpsSamples: 2 }],
+      models: [{ name: 'm', avgOutputTokensPerSec: null, outputTpsSamples: 0 }],
+      recent: [{ requestId: 'one', outputTokensPerSec: 100 }, { requestId: 'two', outputTokensPerSec: null }],
+    }),
+  });
+  assert.equal(get('m-tps-current').textContent, '0.00 tok/s');
+  assert.equal(get('m-tps-peak').textContent, '120.46 tok/s');
+  assert.equal(get('m-tps-avg').textContent, '20.00 tok/s');
+  assert.equal(get('m-output-tps').textContent, '55.00 tok/s');
+  assert.equal(get('m-output-tps').title, '有效样本: 2');
+  assert.equal(get('#table-providers tbody').children[0].children[9].textContent, '55.00 tok/s');
+  assert.equal(get('#table-models tbody').children[0].children[8].textContent, '-');
+  assert.equal(get('#table-recent tbody').children[0].children[9].textContent, '100.00 tok/s');
+  assert.equal(get('#table-recent tbody').children[1].children[9].textContent, '-');
+  const empty = await renderPage({ ok: true, status: 200, json: async () => ({ total: {}, recent: [], models: [], providers: [] }) });
+  assert.equal(empty('m-tps-current').textContent, '-');
+  assert.equal(empty('m-output-tps').textContent, '-');
+  assert.equal(empty('#table-recent tbody').children[0].children[0].colSpan, 10);
+});
+
 test('cache hit rate uses the same input-context denominator for total, provider, and model', async () => {
   const usage = { input: 20, cacheRead: 70, cacheWrite: 10 };
   const get = await renderPage({
@@ -361,8 +402,8 @@ test('cache hit rate uses the same input-context denominator for total, provider
     json: async () => ({ gateway: { online: true }, total: {}, providerNames: [], trend: [], inflight: [], providers: [], models: [], recent: [] }),
   });
   assert.equal(empty('m-cache-hit').textContent, '—');
-  assert.equal(empty('#table-providers tbody').children[0].children[0].colSpan, 9);
-  assert.equal(empty('#table-models tbody').children[0].children[0].colSpan, 8);
+  assert.equal(empty('#table-providers tbody').children[0].children[0].colSpan, 10);
+  assert.equal(empty('#table-models tbody').children[0].children[0].colSpan, 9);
 });
 
 test('switchboard shows real provider usage and filters by clicking a line', async () => {
@@ -1093,8 +1134,8 @@ test('settings save feedback distinguishes unconfirmed reload and legacy partial
 
 test('expanded cost details survive refresh and auto-refresh can be paused', async () => {
   let fetches = 0;
-  const get = await renderPage(async () => {
-    fetches++;
+  const get = await renderPage(async (url) => {
+    if (url !== '/api/session') fetches++;
     return {
       ok: true, status: 200,
       json: async () => ({
@@ -1283,6 +1324,58 @@ test('subagents tab switches view and fetches claude agent configuration', async
   assert.equal(get('sa-field-name').value, 'Explore');
   assert.equal(get('sa-editor-form').classList.contains('hidden'), false);
   assert.equal(get('subagents-warning-banner').classList.contains('hidden'), false);
+});
+
+test('subagents select and save unchecked or failed models without probing', async () => {
+  for (const tool of ['claude', 'codex']) {
+    const calls = [];
+    const data = {
+      tool, root: '/agents', warnings: [],
+      agents: [{ id: 'custom', name: 'custom', description: 'Work', prompt: 'Work',
+        model: null, effort: null, sandbox: null, tools: null, source: 'custom', editable: true, revision: 'rev-1' }],
+      defaults: { model: null, effort: null, revision: 'def-1' },
+      models: [
+        { id: 'fresh', provider: 'relay', targetModel: 'fresh-model', available: true, status: 'unchecked' },
+        { id: 'failed', provider: 'relay', targetModel: 'failed-model', available: true, status: 'failed', checkReason: 'HTTP 503' },
+        { id: 'broken', provider: 'relay', targetModel: 'broken-model', available: false, status: 'unchecked', reason: 'Missing key' },
+      ],
+    };
+    const get = await renderPage(async (url, options = {}) => {
+      if (url.startsWith('/api/subagents')) {
+        calls.push([options.method || 'GET', String(url), options.body]);
+        if (options.method === 'PUT') {
+          const body = JSON.parse(options.body);
+          if (url.endsWith('/defaults')) data.defaults = { ...data.defaults, ...body };
+          else data.agents[0] = { ...data.agents[0], ...body };
+        }
+        return { ok: true, status: 200, json: async () => data };
+      }
+      return { ok: true, status: 200, json: async () => ({ gateway: { online: true }, total: {}, providers: [], models: [], recent: [], trend: [] }) };
+    });
+    get('tab-subagents').listeners.get('click')();
+    await new Promise(resolve => setImmediate(resolve));
+    if (tool === 'codex') {
+      get('tool-codex').listeners.get('click')();
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    for (const id of ['sa-field-model', 'subagents-cab-default-select']) {
+      const choices = get(id).children;
+      assert.equal(choices.find(option => option.value === 'fresh').disabled, false);
+      assert.equal(choices.find(option => option.value === 'failed').disabled, false);
+      assert.equal(choices.find(option => option.value === 'broken').disabled, true);
+    }
+    get('sa-field-model').value = 'fresh';
+    get('sa-field-model').listeners.get('change')();
+    get('btn-subagent-save').listeners.get('click')();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(data.agents[0].model, 'fresh');
+    get('subagents-cab-default-select').listeners.get('change')({ target: { value: 'failed' } });
+    get('btn-save-defaults').listeners.get('click')();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(data.defaults.model, 'failed');
+    assert.equal(calls.filter(([method]) => method === 'PUT').length, 2);
+    assert.ok(!calls.some(([, url]) => url.endsWith('/check-models')));
+  }
 });
 
 test('subagents inspector edits drafts, switches tools, and confirms restore and privilege escalation', async () => {
@@ -1752,4 +1845,37 @@ test('filtered overview and live counts never enable restart while other provide
   active = [];
   await get.intervals.at(-1)();
   assert.equal(get('btn-open-restart').disabled, false);
+});
+
+test('apiFetch silently re-bootstraps same-origin session on 401 and retries without showing auth banner', async () => {
+  let expiredOnce = false;
+  let sessionCalls = 0;
+  const get = await renderPage(async (url, options) => {
+    if (url === '/api/session') {
+      sessionCalls += 1;
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    if (url.startsWith('/api/overview') && expiredOnce) {
+      expiredOnce = false;
+      return { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) };
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        gateway: { online: true, pid: 4321, uptimeSec: 120, activeRequests: 0 },
+        total: {}, providerNames: [], trend: [], inflight: [], providers: [], models: [], recent: [],
+      }),
+    };
+  });
+  assert.equal(sessionCalls, 1);
+  assert.equal(get('auth-expired-banner').classList.contains('hidden'), true);
+
+  expiredOnce = true;
+  get('btn-refresh-overview').listeners.get('click')();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sessionCalls, 2, '401 must trigger a single silent /api/session refresh');
+  assert.equal(get('auth-expired-banner').classList.contains('hidden'), true);
+  assert.equal(get('gw-status-badge').querySelector('.badge-text').textContent, '网关运行中');
 });

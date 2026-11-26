@@ -34,7 +34,7 @@ cp providers.example.json providers.json
 2. 编辑 `providers.json`：配置每个 provider 的 `baseUrl`、`apiType`、模型映射和 `routes`。
 3. 把 `clientToken` 改成仅供本机使用的随机值。Claude Code 配置中的 `ANTHROPIC_AUTH_TOKEN` 必须与它完全相同。
 4. 先运行 `npm test`。该命令仅使用本地模拟上游，不会产生模型费用。
-5. 执行 `node scripts/gw.js start`，再用 `node scripts/gw.js status` 检查状态；执行 `node scripts/gw.js web` 打开管理页。
+5. 双击 `start.vbs` 一键启动：只留下一个管理页应用窗口，没有常驻的命令行黑框；也可以执行 `npm run up`。
 
 让 Claude Code 使用网关时，在其 `settings.json` 的 `env` 中至少配置：
 
@@ -78,14 +78,36 @@ node scripts/gw.js status   # 查看 PID、transport 和源码更新提示
 
 ## 本地管理 Web
 
-```bash
-node scripts/gw.js start          # 启动网关，同时启动独立管理 Web
-node scripts/gw.js web            # 打开浏览器并登录管理页面
-node scripts/gw.js web --no-open  # 仅启动 Web，不打开浏览器
-node scripts/gw.js web --stop     # 仅停止 Web，不影响网关
+Windows 下双击 `start.vbs` 即可。它由 wscript 托管，不会创建控制台窗口：先在后台隐藏执行 `gw.js up` 把网关与管理 Web 拉起，再用 Chrome / Edge 的应用模式打开管理页，桌面上只留下这一个应用窗口（没有地址栏和标签栏，也没有命令行黑框）。`start.cmd` 保留为兼容入口，效果相同。启动输出写在 `logs/launcher.log`；启动失败会弹窗提示，并附上日志尾部。
+
+```powershell
+npm run up                  # 命令行一键启动，并以应用窗口打开管理页
+npm run down                # 命令行停止网关和 Web
+npm run open                # 随时打开（必要时启动）管理 Web（也可双击 open.cmd / open.vbs）
+npm run autostart -- on     # 开启 Windows 登录后台静默自启（网关 + Web，不弹黑框与浏览器）
+npm run autostart -- status # 查看开机自启状态
+npm run autostart -- off    # 关闭开机自启
+npm run panel               # 可选：打开 WinForms 控制面板，不自动启动服务
+npm run panel:start         # 可选：打开控制面板并自动启动缺失的服务
 ```
 
-双击 `start.cmd` 会在网关启动成功后打开管理页面。默认地址为 `http://127.0.0.1:48731/`；默认端口被占用时会自动选一个空闲本地端口，启动命令会显示实际地址。管理服务固定只监听本机，可用 `GATEWAY_WEB_PORT` 指定端口（显式指定端口被占用时报错，不自动改用其他端口）。设置 `GATEWAY_WEB_ENABLED=0` 可禁止 `start` 自动启动 Web，仍可单独执行 `web` 命令。直接运行 `src/server.js` 或使用已有 pm2 启动方式时，需另行执行 `web` 命令。
+应用窗口按 Chrome → Edge 顺序查找，以 `--app=<管理页地址>` 打开；想退回系统默认浏览器（普通标签页）时设置 `GATEWAY_WEB_BROWSER=default`。关闭应用窗口或浏览器标签页不会停止后台服务；可随时重新打开 `http://127.0.0.1:48731/` 或双击 `open.cmd` / `start.vbs` 查看，会话会自动续期与重连。
+
+`npm run panel` 打开的是旧的 WinForms 控制面板（PID、在途请求、运行时间、启停按钮），只作为可选工具保留。它不再是启动入口：Windows 11 默认用 Windows Terminal 承载控制台进程，`-WindowStyle Hidden` 不生效，会留下一个常驻黑框，这正是新入口绕开它的原因。面板中源码比运行进程新时重启按钮会变橙色；有在途请求时停止和重启会暂时禁用，等待请求结束后自动恢复。关闭面板不会停止后台服务。
+
+```bash
+node scripts/gw.js up                  # 一键启动网关和 Web
+node scripts/gw.js up --no-open        # 后台静默启动网关和 Web，不打开浏览器
+node scripts/gw.js down                # 停止网关和 Web
+node scripts/gw.js open                # 随时打开（必要时启动）管理 Web
+node scripts/gw.js autostart on|off|status  # 管理 Windows 开机后台自启
+node scripts/gw.js start               # 仅启动网关，同时确保独立管理 Web 存在
+node scripts/gw.js web                 # 打开浏览器并自动建立本地会话
+node scripts/gw.js web --no-open       # 仅启动 Web，不打开浏览器
+node scripts/gw.js web --stop          # 仅停止 Web，不影响网关
+```
+
+默认 Web 地址为 `http://127.0.0.1:48731/`；如果本机已有健康运行中的管理 Web 实例，重复启动会自动复用该实例而不是另起随机端口。仅当默认端口被其他非网关程序占用时才会自动选一个空闲本地端口，实际地址见 `logs/launcher.log` 和管理页本身。管理服务固定只监听本机，可用 `GATEWAY_WEB_PORT` 指定端口（显式指定端口被其他程序占用时报错，不自动改用其他端口）。设置 `GATEWAY_WEB_ENABLED=0` 可禁止自动启动 Web；此时启动器只拉起网关并在日志里说明 Web 已禁用。直接运行 `src/server.js` 或使用已有 pm2 启动方式时，需另行执行 `web` 命令。
 
 - **运行概览**：网关状态、在途请求、历史趋势、请求明细，以及各 provider 和模型的 tokens / USD 消耗。可按时间和站点筛选，网关停止时仍可查看历史账本。费用使用统一模型 API 单价，不是站点账户余额；未上报用量和缺失价格单独标记。
 - **请求日志**：stdout / stderr 切换、关键词和异常筛选、暂停刷新，以及下载当前可见日志。读取文件末尾的有界窗口，不加载无限增长的整份日志。
@@ -101,7 +123,7 @@ node scripts/gw.js web --stop     # 仅停止 Web，不影响网关
 
 - Claude Code：读取 `CLAUDE_CONFIG_DIR` 或 `~/.claude` 下的 `agents/*.md`，采用 YAML frontmatter 和 Markdown 正文。全局默认只修改同目录 `settings.json` 的 `env.CLAUDE_CODE_SUBAGENT_MODEL`。
 - Codex：读取 `CODEX_HOME` 或 `~/.codex` 下的 `agents/*.toml`。全局默认只修改 `config.toml` 中 `[agents]` 的 `default_subagent_model` 和 `default_subagent_reasoning_effort`，不改主会话模型或凭据。
-- 候选来自网关路由和提供商模型映射。“检测模型”通过本机网关发送少量真实请求，会产生费用；Claude Code 使用 Messages，Codex 使用 Responses。只有检测通过的线路可作为新选择，失效的旧模型仍保留供查看和编辑其他字段。结果保存在管理状态目录的 `subagent-model-checks.json`，24 小时后或配置变化后需要重新检测；实测通过不代表上游永远可用。
+- 候选来自网关路由和提供商模型映射。配置完整的线路可直接选择并保存到子代理或全局默认模型，无需先检测；未检测、检测失败或检测结果过期均不阻止切换。缺少提供商或必需密钥的线路不可选择，失效的旧模型仍保留供查看和编辑其他字段。“检测模型”为可选操作，通过本机网关发送少量真实请求，会产生费用；Claude Code 使用 Messages，Codex 使用 Responses。结果保存在管理状态目录的 `subagent-model-checks.json`，24 小时后或配置变化后显示为未检测；实测通过不代表上游永远可用。
 - Claude 的“未指定”与 `inherit` 分开处理；`opus` / `sonnet` / `haiku` 由客户端解析，不作为可直接绑定的网关线路。Codex 的继承通过移除配置项实现。客户端调用参数、环境变量和会话覆盖仍可能影响最终模型。
 - 保存使用文件版本检查、备份和同目录临时文件原子替换，保留未知字段与无关配置。备份位于 `logs/config-backups`。拒绝越界路径、链接和重名覆盖；损坏文件显示错误，不强制修复。恢复内置默认会备份并移除用户覆盖文件，不改客户端内置代码。
 - 写入成功只代表文件已保存，不代表运行中的客户端已重新加载。必要时新建会话或重启客户端；管理台不会自动重启客户端或网关。
@@ -212,9 +234,10 @@ cp providers.example.json providers.json
 
 ### 3. 启动
 
-```bash
-node src/server.js
-# 或双击 start.cmd
+```powershell
+.\start.vbs         # 双击即可：隐藏启动服务，只打开一个管理页应用窗口
+npm run up          # 命令行一键启动并以应用窗口打开管理页
+node src/server.js  # 仅前台运行网关，不包含管理 Web
 ```
 
 后台常驻（你已装 pm2）：
@@ -364,6 +387,13 @@ node scripts/gw.js tokens 7d --provider relay --table   # 只查看 relay 站点
 - 状态 499 表示客户端取消（在 Claude Code 里按 Esc），单独计数，不算失败。
 - 报表末尾列出网关当前在途的请求；流式请求收到 `message_start` 后会显示本次上下文大小。
 - 原始数据：`GET /v1/usage`（需客户端 token）返回本次启动以来的内存汇总、在途请求和最近 200 条。
+
+### TPS 统计
+
+- **Token 吞吐量**：已结束请求上报的输入、输出、缓存读、缓存写 token 合计除以时间窗口秒数。运行概览展示末 60 秒、自然分钟峰值和所选时段平均值；空闲时间也计入分母。按请求结束时间归属，不是逐 token 实时解码速度。
+- **输出 TPS**：成功请求的输出 token 除以总耗时（秒），含排队、重试和首 token 等待。提供商、模型和总计展示有效请求速率的算术平均；最近请求展示单次速率。取消、失败、未上报输出、零输出或零耗时不作为平均样本，缺失值显示 `-`。
+- `GET /v1/usage` 新增 `traffic.tps`（最近 60 秒）及各维度的 `avgOutputTokensPerSec`、`outputTpsSamples`；新账本保存 `outputTokensPerSec`。管理 API `GET /api/overview` 返回时间/站点筛选后的历史吞吐与输出速率，旧账本无需迁移。
+- 公式和边界参考 sub2api，详见 [TPS 实现审查](docs/sub2api-tps-review-2026-10-06.md)。执行 `npm run test:tps` 验证指标口径。部署时需在空闲时重启网关，并重新启动管理 Web；修改源码不会更新旧进程。
 - `GATEWAY_USAGE_DIR` 可改账本目录，设为 `off` 关闭。设置了自定义 `GATEWAY_CONFIG`（离线测试都会设）且没设 `GATEWAY_USAGE_DIR` 时不记账，避免测试数据混进真实账本。
 
 ## 按客户端选择客户端指纹
@@ -372,8 +402,8 @@ node scripts/gw.js tokens 7d --provider relay --table   # 只查看 relay 站点
 
 - `claude-cli/*`、`claude-code/*`、`x-claude-code-session-id`，或带有 Anthropic/Stainless 头的 `x-app: cli` 识别为 Claude Code。
 - `Codex ...`、`originator` 或 `x-codex-*` 识别为 Codex。
-- `deepseek-harness ...`、`x-deepseek-harness-*`、`x-harness-*` 或 `x-client-name: deepseek-harness` 识别为 DeepSeek Harness；其它带 `deepseek` 标识的请求识别为 DeepSeek。
-- 默认情况下保留实际入站客户端指纹，包括自定义 `x-*` 头；仅删除客户端凭据、固定逐跳头、`Connection` 指定的逐跳头和需重新计算的长度/编码头，再设置上游鉴权。
+- DeepSeek Harness 按实际在用的 dsh-llm 0.2.0-rc.2 客户端识别：`deepseek-harness/<版本> (+https://github.com/deepseek-ai/deepseek-harness)`、`x-deepseek-harness-user-id` / `x-deepseek-harness-session-id` / `x-deepseek-harness-compact`、账户登录用的 `x-dsh-auth-token`，或显式自称 `x-client-name: deepseek-harness`。这些线索先于 Claude Code / Codex 的通用启发式判定，不会被抢走；其它带 `deepseek` 标识的请求才识别为 DeepSeek。未经验证的 `x-harness-*` 前缀不再作为依据。
+- 默认情况下保留实际入站客户端指纹，包括自定义 `x-*` 头；仅删除客户端凭据（`authorization`、`x-api-key`，以及 DeepSeek Harness 的账户凭据 `x-dsh-auth-token`）、固定逐跳头、`Connection` 指定的逐跳头和需重新计算的长度/编码头，再设置上游鉴权。
 - 唯一的自动改写特例是：**识别为 Claude Code 且最终上游模型属于 GPT/OpenAI 系列时**，生成既有 Codex 风格头，以保持 GPT 的缓存行为。Codex、DeepSeek Harness 和未知客户端不会因为目标模型名是 `gpt-*` 就被伪装成 Codex。
 - 覆盖优先级为路由 `clientProfile` > provider `clientProfile` > 客户端识别。支持 `auto` / `claude` / `codex`；显式 `codex` 对 Claude Code 和未知客户端仍会生成 Codex profile，但已识别的 Codex/DeepSeek Harness 会优先保留自身入站指纹。
 - Codex 请求不会混入 Claude 身份头；同一逻辑请求的重试复用 session/turn/request ID，独立请求使用新上下文，installation ID 在本进程内稳定。可用 `CODEX_INSTALLATION_ID` 固定跨重启标识。
@@ -392,6 +422,28 @@ node scripts/gw.js tokens 7d --provider relay --table   # 只查看 relay 站点
 - 上游 JSON、错误响应及 SSE 的响应体原样转发，不重新生成 ID 或事件，不把响应 model 改回别名。压缩响应按现有传输层解压后转发；usage 仅旁路读取用于记账。
 - 其它客户端或 Anthropic/Gemini provider 继续走兼容转换：支持文本、developer 指令和基础 function tools，但不保证无损；兼容路径的 `previous_response_id` 仅保存在当前网关进程中。
 - Claude Code 调用 GPT 时沿用既有 Codex 指纹特殊逻辑，此次直通功能不改变它。
+
+### 原生 DeepSeek Harness 接入
+
+DeepSeek Harness（DSH）有四条客户端协议路径，网关覆盖其中三条：
+
+| DSH 侧配置 | 请求落到 | 网关 |
+|---|---|---|
+| `llm-deepseek`（`deepseek-api-key` / `deepseek-account` 提供方） | `{baseURL}/v1/messages` | ✅ 主路径，Anthropic 协议逐字节透传 |
+| `llm-pi-ai`，`api: anthropic-messages` | `{baseURL}/v1/messages` | ✅ 同一个 Messages 入口 |
+| `llm-pi-ai`，`api: openai-responses` | `{baseURL}/responses` | ✅ 走 `/v1/responses` 入口（`baseURL` 写到 `.../v1`） |
+| `llm-pi-ai`，`api: openai-completions` | `{baseURL}/chat/completions` | ❌ 网关没有 Chat Completions 入口，404 |
+
+`llm-deepseek` 把 `baseURL` 补成 `${baseURL}/v1`（已经以 `/v1` 结尾时不重复追加）再请求 `/messages`，所以把 DSH 的 `baseURL` 指向网关即可，不要再手写 `/v1/messages`；网关的 `/v1/messages`、`/v1/messages/count_tokens` 和 `/v1/models` 都是现成入口，不需要新的 provider 类型。
+
+DSH 桌面版默认用自带的 `deepseek-account` 提供方直连 DeepSeek，**不会**经过网关（账户 token 由 DeepSeek 账户平台按目标地址签发，指向本机网关会直接报未登录）；要让 DSH 走网关，改用 `deepseek-api-key` 提供方或 `llm-pi-ai` 的 `anthropic-messages`，把 `baseURL` 改成网关地址、密钥填 `clientToken`。
+
+- **凭据**：DSH 按提供方发送客户端凭据——`deepseek-api-key` 提供方和 pi-ai 的 `anthropic-messages` 发 `x-api-key`，账户登录的 `deepseek-account` 发 `x-dsh-auth-token`，pi-ai 的 OpenAI 类提供方走 `authorization: Bearer`。任何一种的值只要等于 `clientToken` 即通过。转发上游前客户端凭据一律换成上游 key，DSH 的账户凭据不会外流。
+- **识别**：DSH 请求在账本、`GET /v1/usage` 和管理台里都记为 `deepseek-harness`；命令行日志与启动横幅用 `⬢[DSH]⬢` 图标把它和普通 DeepSeek 客户端（`~(·)><`）分开。
+- **原样保留（Anthropic 协议路由）**：`user-agent`、`anthropic-version`、`anthropic-beta`、`x-deepseek-harness-*` 以及请求体逐字节透传，包括官方 DeepSeek 请求的 `dsh_session_log`、`dsh_plugin_packages` 顶层扩展字段和 `output_config.effort`。这两个扩展字段由 DSH 插件无条件贡献、不检查目标地址：`dsh_session_log` 会带上会话日志后缀、`dsh_plugin_packages` 会带上插件清单，路由到第三方站点时同样转给该站点；不希望外发请在 DSH 侧关掉贡献它们的插件。
+- **中途工具启停与思考回放**：DSH 用 system 角色的 `tool_addition` / `tool_removal` 块表达工具启停，并带 `mid-conversation-tool-changes-2026-07-01`。Anthropic 协议路由原样转发；OpenAI / Gemini 转换路径与 `messagesTransport: "responses"` 的 provider 没有对应表达，只跳过这些控制块（工具定义仍随 `tools` 传给上游）。同一路径上 DSH 必带的 `thinking` 开关和带签名的思考历史也会被跳过，而不是让整条请求 400。
+- **空完成**：上游整段没有产出内容块时，网关先补一个空文本块再收尾——Anthropic 协议保证至少一个内容块，DSH 的 `translate()` 也会把「零块 + `end_turn`」判成 `EMPTY_RESPONSE` 并让本轮失败。
+- **已知限制**：网关不代理 DeepSeek Files API，`POST/GET/DELETE /v1/files` 返回 404，DSH 按自身设计退化为内联 base64 图片，转 OpenAI/Gemini 上游时图片仍会被忽略。DSH 只在模型 ID 一致时回放思考签名，所以把同一个路由别名从 DeepSeek 类上游改到 Claude 类上游后，旧会话回放的签名会被 Claude 上游拒绝，需要新开会话。白标部署改写了 DSH 的 `user-agent` 产品标识、又使用不发 `x-deepseek-harness-*` 的 `llm-pi-ai` 时，请求会显示为未识别。
 
 这些规则同时用于生成、Anthropic token 计数及各适配器的模型发现；模型发现没有目标模型时使用 provider 的显式 profile 或默认 Claude profile。公开 `/v1/models` 仍只列本地路由。
 

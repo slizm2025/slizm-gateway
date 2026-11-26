@@ -113,9 +113,16 @@ export function responsesToAnthropic(body) {
 }
 
 function responseUsage(usage = {}) {
-  const input = Number(usage.input_tokens ?? 0) || 0;
+  const cached = Number(usage.cache_read_input_tokens ?? 0) || 0;
+  const written = Number(usage.cache_creation_input_tokens ?? 0) || 0;
+  const input = (Number(usage.input_tokens ?? 0) || 0) + cached + written;
   const output = Number(usage.output_tokens ?? 0) || 0;
-  return { input_tokens: input, output_tokens: output, total_tokens: input + output };
+  const details = {};
+  // 标准字段 cached_tokens 保持原样；缓存写入走兼容字段，只在来源明确上报写入时添加。
+  if (usage.cache_read_input_tokens != null) details.cached_tokens = cached;
+  if (usage.cache_creation_input_tokens != null) details.cache_write_tokens = written;
+  return { input_tokens: input, output_tokens: output, total_tokens: input + output,
+    ...(Object.keys(details).length ? { input_tokens_details: details } : {}) };
 }
 
 function outputItems(message) {
@@ -218,6 +225,7 @@ export function anthropicToResponsesStream(upstreamBody, requestedModel, options
       if (event.type === 'message_start') {
         state.message.id = event.message?.id;
         state.usage = event.message?.usage ?? {};
+        try { options.onUsage?.({ ...state.usage }); } catch { /* Usage reporting must not affect the stream. */ }
         continue;
       }
       if (event.type === 'content_block_start') {
@@ -266,7 +274,9 @@ export function anthropicToResponsesStream(upstreamBody, requestedModel, options
         continue;
       }
       if (event.type === 'message_delta') {
-        state.usage = { ...state.usage, ...(event.usage ?? {}) };
+        for (const [key, value] of Object.entries(event.usage ?? {})) {
+          if (value != null) state.usage[key] = value;
+        }
         try { options.onUsage?.(event.usage); } catch { /* Usage reporting must not affect the stream. */ }
         continue;
       }

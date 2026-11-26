@@ -9,6 +9,7 @@ import { createAdminServer } from '../src/admin/server.js';
 import { calculateTrend, parsePeriodRange, resolveTrendStep, TREND_OTHER_KEY } from '../src/admin/data.js';
 import { ROOT } from '../src/config.js';
 import { computeRevision } from '../src/admin/settings.js';
+import { pricingChangeRequiresRestart } from '../src/runtime-pricing.js';
 
 async function createFixture() {
   const baseDir = await mkdtemp(join(tmpdir(), 'cg-admin-test-'));
@@ -206,6 +207,32 @@ test('Host validation, origin check, bootstrap session, CSRF and secrets redacti
     assert.match(setCookie, /HttpOnly/i);
     assert.match(setCookie, /SameSite=Strict/i);
     sessionCookie = setCookie.split(';')[0];
+  }
+
+  for (const headers of [
+    { Origin: origin, 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' },
+    { Origin: origin, 'Content-Type': 'application/json' },
+  ]) {
+    const session = await requestHttp({ host: '127.0.0.1', port, path: '/api/session', method: 'POST', headers }, {});
+    assert.equal(session.status, 200);
+    const cookie = session.headers['set-cookie'][0];
+    assert.match(cookie, /HttpOnly; SameSite=Strict/);
+    const overview = await requestHttp({ host: '127.0.0.1', port, path: '/api/overview', headers: { Cookie: cookie.split(';')[0] } });
+    assert.equal(overview.status, 200);
+  }
+  for (const headers of [
+    { 'Content-Type': 'application/json' },
+    { Origin: 'http://evil.test', 'Content-Type': 'application/json' },
+    { Origin: origin, 'Content-Type': 'text/plain' },
+    { Origin: origin },
+    { Origin: origin, 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'cross-site' },
+    { Origin: origin, 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-site' },
+    { Origin: origin, 'Content-Type': 'application/json', Authorization: 'Bearer invalid' },
+    { Host: 'evil.test:' + port, Origin: origin, 'Content-Type': 'application/json' },
+  ]) {
+    const session = await requestHttp({ host: '127.0.0.1', port, path: '/api/session', method: 'POST', headers }, {});
+    assert.ok(session.status >= 400);
+    assert.equal(session.headers['set-cookie'], undefined);
   }
 
   // 7. Mutating request (PUT /api/settings) with invalid origin -> 403 CSRF rejection
@@ -1155,4 +1182,167 @@ test('Settings preserves exact all-1 priceMultipliers when wildcard multiplier i
   const provA = diskContent.providers.find((p) => p.name === 'prov-a');
   assert.ok(provA.priceMultipliers['claude-exact-exempt'], 'Exact all-1 multiplier must be preserved on disk when wildcard is non-1');
   assert.equal(provA.priceMultipliers['claude-exact-exempt'].input, 1);
+});
+
+test('Settings serialize messagesTransport default auto, keep explicit values and reject non-openai responses', async (t) => {
+  const fixture = await createFixture();
+  t.after(async () => {
+    await fixture.cleanup();
+  });
+
+  const sessionSecret = '556677889900aabbccddeeff0011223344556677889900aabbccddeeff001122';
+  const server = createAdminServer({
+    configPath: fixture.configPath,
+    logDir: fixture.logDir,
+    ledgerDir: fixture.ledgerDir,
+    backupDir: fixture.backupDir,
+    stateDir: fixture.stateDir,
+    sessionSecret,
+    reloadPricing: async () => ({ reloadApplied: true, restartRequired: false }),
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const origin = 'http://127.0.0.1:' + port;
+  const sessionRes = await requestHttp({
+    host: '127.0.0.1',
+    port,
+    path: '/api/session',
+    method: 'POST',
+    headers: { Host: '127.0.0.1:' + port, Origin: origin, Authorization: 'Bearer ' + sessionSecret },
+  });
+  const cookie = (sessionRes.headers['set-cookie']?.[0] || sessionRes.headers['set-cookie']).split(';')[0];
+  const authHeaders = { Host: '127.0.0.1:' + port, Origin: origin, Cookie: cookie };
+  const putJson = { ...authHeaders, 'Content-Type': 'application/json' };
+
+  // 1. 配置里未写 messagesTransport 的 provider 序列化为默认 auto
+  const initial = await requestHttp({ host: '127.0.0.1', port, path: '/api/settings', headers: authHeaders });
+  assert.equal(initial.status, 200);
+  assert.deepEqual(initial.json.providers.map((p) => p.name).sort(), ['prov-a', 'prov-b']);
+  for (const p of initial.json.providers) {
+    assert.equal(p.messagesTransport, 'auto', `${p.name} should serialize the auto default`);
+  }
+
+  const autoSaved = await requestHttp({ host: '127.0.0.1', port, path: '/api/settings', method: 'PUT', headers: putJson }, initial.json);
+  assert.equal(autoSaved.status, 200);
+  const autoConfig = JSON.parse(await readFile(fixture.configPath, 'utf8'));
+  assert.ok(autoConfig.providers.every((p) => p.messagesTransport === 'auto'));
+  const current = await requestHttp({ host: '127.0.0.1', port, path: '/api/settings', headers: authHeaders });
+  initial.json = current.json;
+  const overview = await requestHttp({ host: '127.0.0.1', port, path: '/api/overview?period=all', headers: authHeaders });
+  assert.equal(overview.status, 200, JSON.stringify(overview.json));
+
+  // 2. 非 openai（prov-a）显式 responses 被拒绝
+  const rejected = await requestHttp({ host: '127.0.0.1', port, path: '/api/settings', method: 'PUT', headers: putJson }, {
+    ...initial.json,
+    providers: initial.json.providers.map((p) => (p.name === 'prov-a' ? { ...p, messagesTransport: 'responses' } : p)),
+  });
+  assert.equal(rejected.status, 400);
+  assert.equal(JSON.parse(await readFile(fixture.configPath, 'utf8')).providers.find((p) => p.name === 'prov-a').messagesTransport, 'auto');
+
+  // 3. openai（prov-b）responses 与显式 chat-completions 均写盘保留
+  const accepted = await requestHttp({ host: '127.0.0.1', port, path: '/api/settings', method: 'PUT', headers: putJson }, {
+    ...initial.json,
+    providers: initial.json.providers.map((p) => (
+      p.name === 'prov-a' ? { ...p, messagesTransport: 'chat-completions' } : { ...p, messagesTransport: 'responses' }
+    )),
+  });
+  assert.equal(accepted.status, 200);
+  const saved = JSON.parse(await readFile(fixture.configPath, 'utf8'));
+  assert.equal(saved.providers.find((p) => p.name === 'prov-a').messagesTransport, 'chat-completions');
+  assert.equal(saved.providers.find((p) => p.name === 'prov-b').messagesTransport, 'responses');
+});
+
+test('messagesTransport auto default does not trigger a false restart flag', () => {
+  const before = { providers: [{ name: 'p', apiType: 'openai', apiKey: 'key1' }], routes: {} };
+  const materializedAuto = { providers: [{ name: 'p', apiType: 'openai', apiKey: 'key1', messagesTransport: 'auto' }], routes: {} };
+  assert.equal(pricingChangeRequiresRestart(before, materializedAuto), false, 'materialized auto default must not require a restart');
+  const switched = { providers: [{ name: 'p', apiType: 'openai', apiKey: 'key1', messagesTransport: 'responses' }], routes: {} };
+  assert.equal(pricingChangeRequiresRestart(before, switched), true, 'a real transport switch still requires a restart');
+});
+
+test('Active admin session renews slidingly before expiry', async (t) => {
+  const fixture = await createFixture();
+  t.after(async () => { await fixture.cleanup(); });
+
+  const server = createAdminServer({
+    configPath: fixture.configPath,
+    logDir: fixture.logDir,
+    ledgerDir: fixture.ledgerDir,
+    backupDir: fixture.backupDir,
+    stateDir: fixture.stateDir,
+    cookieTtlMs: 240,
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); });
+
+  const origin = 'http://127.0.0.1:' + port;
+  const sessionRes = await requestHttp({
+    host: '127.0.0.1', port, path: '/api/session', method: 'POST',
+    headers: { Host: '127.0.0.1:' + port, Origin: origin, 'Content-Type': 'application/json' },
+  }, {});
+  assert.equal(sessionRes.status, 200);
+  const cookie = (sessionRes.headers['set-cookie']?.[0] || sessionRes.headers['set-cookie']).split(';')[0];
+
+  // Wait past half TTL (140ms > 120ms), then make an authenticated request to trigger sliding renewal.
+  await new Promise((r) => setTimeout(r, 140));
+  const mid = await requestHttp({
+    host: '127.0.0.1', port, path: '/api/settings',
+    headers: { Host: '127.0.0.1:' + port, Origin: origin, Cookie: cookie },
+  });
+  assert.equal(mid.status, 200);
+  assert.ok(mid.headers['set-cookie'], 'active session past half TTL should receive a refreshed cookie');
+
+  // Wait another 140ms (280ms total > original 240ms TTL) — session must still be valid!
+  await new Promise((r) => setTimeout(r, 140));
+  const afterOriginalTtl = await requestHttp({
+    host: '127.0.0.1', port, path: '/api/settings',
+    headers: { Host: '127.0.0.1:' + port, Origin: origin, Cookie: cookie },
+  });
+  assert.equal(afterOriginalTtl.status, 200);
+});
+
+test('Launching a second admin server on the same port reuses the live instance without port hopping', async (t) => {
+  const fixture = await createFixture();
+  t.after(async () => { await fixture.cleanup(); });
+
+  const primary = createAdminServer({
+    configPath: fixture.configPath,
+    logDir: fixture.logDir,
+    ledgerDir: fixture.ledgerDir,
+    backupDir: fixture.backupDir,
+    stateDir: fixture.stateDir,
+  });
+  await new Promise((resolve) => primary.listen(0, '127.0.0.1', resolve));
+  const port = primary.address().port;
+  t.after(async () => { await new Promise((resolve) => primary.close(resolve)); });
+
+  const sessionFile = join(fixture.stateDir, 'web-session.json');
+  const sentinel = JSON.stringify({ pid: process.pid, port, token: 'a'.repeat(64) });
+  await writeFile(sessionFile, sentinel, 'utf8');
+
+  const child = spawn(process.execPath, [join(ROOT, 'src', 'admin', 'server.js')], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      GATEWAY_WEB_PORT: String(port),
+      GATEWAY_WEB_STATE_DIR: fixture.stateDir,
+      GATEWAY_CONFIG: fixture.configPath,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (c) => { stdout += c.toString('utf8'); });
+  child.stderr.on('data', (c) => { stderr += c.toString('utf8'); });
+
+  const code = await new Promise((resolve) => child.once('exit', resolve));
+  assert.equal(code, 0, `second server should exit 0 cleanly, stderr: ${stderr}`);
+  assert.match(stdout, /复用现有实例/);
+  assert.equal(await readFile(sessionFile, 'utf8'), sentinel, 'existing web-session.json must not be overwritten');
 });

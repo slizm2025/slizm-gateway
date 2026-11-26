@@ -3,7 +3,7 @@
 // 转换规则参考 claude-code-router 与 cc-fleet 的做法。
 import { upstreamFetch, readResponseText } from '../upstream-fetch.js';
 import { openAIChunks } from '../sse.js';
-import { forwardClientHeaders, forwardEndToEndHeaders, resolveClientProfile, createCodexContext, buildCodexHeaders, withExtraHeaders } from './client-headers.js';
+import { forwardClientHeaders, forwardEndToEndHeaders, resolveClientProfile, createRequestProfile, buildCodexHeaders, withExtraHeaders } from './client-headers.js';
 import { replaceResponseModel } from './response-body.js';
 
 function blocksToText(content) {
@@ -12,7 +12,51 @@ function blocksToText(content) {
     : String(content ?? '');
 }
 
-export function toOpenAIMessages(system, messages) {
+/** 非 Anthropic 上游无法表达图片时的统一降级标记（聊天补全与 Responses 适配器共用）。 */
+export const NON_ANTHROPIC_IMAGE_PLACEHOLDER = '[图片输入在非 Anthropic 上游被忽略]';
+
+/**
+ * Anthropic 图片块 -> Chat Completions 的 image_url 部件。
+ * 上游（DeepSeek 视觉模型，2026-11 实测 deepseek-v4.1-flash 认图）接受 data URL 与远程 URL 两种写法；
+ * Files API 引用（source.type === 'file'）在网关侧没有对应文件句柄，只能降级。
+ * @param block Anthropic 内容块
+ * @returns image_url 的 url 字段，无法表达时为 undefined
+ */
+function imageURLOf(block) {
+  const source = block?.source;
+  if (!source || typeof source !== 'object') return undefined;
+  if (source.type === 'base64' && typeof source.data === 'string' && source.data) {
+    const mediaType = typeof source.media_type === 'string' && source.media_type ? source.media_type : 'image/png';
+    return `data:${mediaType};base64,${source.data}`;
+  }
+  if (source.type === 'url' && typeof source.url === 'string' && source.url) return source.url;
+  return undefined;
+}
+
+/**
+ * 构造 user 消息的 content：有图片时用部件数组（文本在前、图片在后），否则退回纯字符串。
+ * @param textParts 文本片段
+ * @param imageParts 图片 URL 列表
+ */
+function userContent(textParts, imageParts) {
+  if (!imageParts.length) return textParts.join('\n');
+  const parts = [];
+  if (textParts.length) parts.push({ type: 'text', text: textParts.join('\n') });
+  for (const url of imageParts) parts.push({ type: 'image_url', image_url: { url } });
+  return parts;
+}
+
+/**
+ * DeepSeek 思考模式要求把上一轮思考原样带回：请求以 tool 结果结尾时，
+ * 最后一条带 tool_calls 的 assistant 消息必须带 reasoning_content，缺字段或 null 会被上游 400
+ * （"The `reasoning_content` in the thinking mode must be passed back to the API."，2026-11-01 实测）。
+ * 空字符串可以通过校验，所以拿不到思考文本时也要显式回填空串。
+ * 其它 OpenAI 兼容上游没有这个字段，只对 DeepSeek 系列模型回填，避免把陌生字段传给 GPT 等上游。
+ */
+const DEEPSEEK_MODEL = /(^|[/])deepseek/i;
+
+export function toOpenAIMessages(system, messages, options = {}) {
+  const replayReasoning = options.replayReasoning === true;
   const out = [];
   // Claude Code 会把环境信息等作为 role=system 的消息放进 messages（mid-conversation system）。
   // 降级成 user 会让它变成最后一条"用户输入"，所以统一并回开头的 system 消息。
@@ -30,6 +74,8 @@ export function toOpenAIMessages(system, messages) {
     }
     const blocks = Array.isArray(m.content) ? m.content : [{ type: 'text', text: m.content }];
     const textParts = [];
+    const imageParts = [];
+    const thinkingParts = [];
     const toolCalls = [];
     const toolResults = [];
 
@@ -48,26 +94,46 @@ export function toOpenAIMessages(system, messages) {
           : String(b.content ?? '');
         toolResults.push({ role: 'tool', tool_call_id: b.tool_use_id, content });
       } else if (b.type === 'image') {
-        // 非 Claude 上游多数不支持图片，降级为文字标记而不是报错
-        textParts.push('[图片输入在非 Anthropic 上游被忽略]');
+        // 视觉上游（如 DeepSeek 视觉模型）接受 image_url 部件；解析不了来源的才降级为文字标记。
+        const url = imageURLOf(b);
+        if (url) imageParts.push(url);
+        else textParts.push(NON_ANTHROPIC_IMAGE_PLACEHOLDER);
+      } else if (b.type === 'tool_addition' || b.type === 'tool_removal') {
+        // DeepSeek 官方 Messages 协议的中途工具启停块（dsh-llm-deepseek）：
+        // 被引用的工具本身已在顶层 tools 里声明，聊天补全没有“此刻启用/停用”的表达，
+        // 只能丢掉这个顺序信号，绝不能把控制块当成文本写进消息。
+      } else if (b.type === 'thinking') {
+        // Anthropic 的思考块在 Chat Completions 里没有独立位置，只能回填成 reasoning_content；
+        // 不需要回填的上游（非 DeepSeek）保持原来的丢弃行为。
+        if (replayReasoning && typeof b.thinking === 'string' && b.thinking) thinkingParts.push(b.thinking);
       }
     }
 
     if (toolResults.length) {
       out.push(...toolResults);
-      if (textParts.length) out.push({ role: 'user', content: textParts.join('\n') });
+      if (textParts.length || imageParts.length) out.push({ role: 'user', content: userContent(textParts, imageParts) });
       continue;
     }
     if (m.role === 'assistant' && toolCalls.length) {
-      out.push({
+      const message = {
         role: 'assistant',
         content: textParts.join('\n') || null,
         tool_calls: toolCalls,
-      });
+      };
+      // 带 tool_calls 的 assistant 消息是 DeepSeek 思考模式校验的对象：必须带字符串，
+      // 没有思考文本可重放时给空串（上游拒绝缺失/null，但接受空串）。
+      if (replayReasoning) message.reasoning_content = thinkingParts.join('\n');
+      out.push(message);
       continue;
     }
-    if (textParts.length || m.role === 'user') {
-      out.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: textParts.join('\n') });
+    if (textParts.length || imageParts.length || m.role === 'user') {
+      const role = m.role === 'assistant' ? 'assistant' : 'user';
+      // assistant 消息在聊天补全里不带图片部件，图片只出现在 user 侧。
+      const message = { role, content: role === 'user' ? userContent(textParts, imageParts) : textParts.join('\n') };
+      if (replayReasoning && role === 'assistant' && thinkingParts.length) {
+        message.reasoning_content = thinkingParts.join('\n');
+      }
+      out.push(message);
     }
   }
   if (systemTexts.length) {
@@ -103,7 +169,9 @@ export function buildOpenAIBody(body, targetModel) {
   const { tools, tool_choice } = toOpenAITools(body.tools, body.tool_choice);
   const req = {
     model: targetModel,
-    messages: toOpenAIMessages(body.system, body.messages),
+    messages: toOpenAIMessages(body.system, body.messages, {
+      replayReasoning: DEEPSEEK_MODEL.test(String(targetModel ?? '')),
+    }),
     max_tokens: body.max_tokens ?? 4096,
     stream: Boolean(body.stream),
   };
@@ -129,37 +197,100 @@ const tokenCount = (value) => {
   return Number.isSafeInteger(n) && n > 0 ? n : 0;
 };
 
+// 缓存读写别名的优先级；同一批数据只取第一个合法正整数，不累加。
+const CACHE_READ_PATHS = [
+  ['input_tokens_details', 'cached_tokens'],
+  ['prompt_tokens_details', 'cached_tokens'],
+  ['cached_tokens'],
+  ['cache_read_tokens'],
+  ['cache_read_input_tokens'],
+  ['prompt_cache_hit_tokens'],
+];
+const CACHE_WRITE_PATHS = [
+  ['input_tokens_details', 'cache_write_tokens'],
+  ['prompt_tokens_details', 'cache_write_tokens'],
+  ['input_tokens_details', 'cache_creation_tokens'],
+  ['prompt_tokens_details', 'cache_creation_tokens'],
+  ['cache_write_tokens'],
+  ['cache_creation_input_tokens'],
+  ['cache_write_input_tokens'],
+  ['cache_creation_tokens'],
+];
+
+function readPath(usage, path) {
+  let value = usage;
+  for (const key of path) {
+    if (value == null || typeof value !== 'object') return undefined;
+    value = value[key];
+  }
+  return value;
+}
+
+// 零值和非法别名不遮蔽后续正值；没有正值时区分明确零与未上报。
+function firstTokenCount(usage, paths) {
+  let reportedZero = false;
+  for (const path of paths) {
+    const raw = readPath(usage, path);
+    if (raw == null || !['number', 'string'].includes(typeof raw) || (typeof raw === 'string' && !raw.trim())) continue;
+    const n = tokenCount(raw);
+    if (n > 0) return { value: n, reported: true };
+    if (n === 0 && Number(raw) === 0) reportedZero = true;
+  }
+  return { value: 0, reported: reportedZero };
+}
+
 /**
  * OpenAI usage 换算成 Anthropic 语义。prompt_tokens / input_tokens 是总输入，
  * cached_tokens 是缓存读取；cache_write_tokens 是缓存写入。中转可能使用
  * cache_creation_tokens 等兼容字段，同一批写入只取一个字段，不累加。
  * DeepSeek 的 prompt_cache_miss_tokens 是普通输入，不代表缓存写入。
+ * 只有总输入可用时才拆分普通输入；缺总输入时不凭空制造 input_tokens = 0。
  */
 export function anthropicUsageFromOpenAI(usage) {
-  if (!usage || !['prompt_tokens', 'input_tokens', 'completion_tokens', 'output_tokens'].some((k) => usage[k] != null)) return {};
-  const prompt = tokenCount(usage?.prompt_tokens ?? usage?.input_tokens);
-  const cached = Math.min(prompt, tokenCount(
-    usage?.input_tokens_details?.cached_tokens
-      ?? usage?.prompt_tokens_details?.cached_tokens
-      ?? usage?.cached_tokens
-      ?? usage?.cache_read_tokens
-      ?? usage?.cache_read_input_tokens
-      ?? usage?.prompt_cache_hit_tokens,
-  ));
-  const written = Math.min(prompt - cached, tokenCount(
-    usage?.input_tokens_details?.cache_write_tokens
-      ?? usage?.prompt_tokens_details?.cache_write_tokens
-      ?? usage?.input_tokens_details?.cache_creation_tokens
-      ?? usage?.prompt_tokens_details?.cache_creation_tokens
-      ?? usage?.cache_write_tokens
-      ?? usage?.cache_creation_input_tokens
-      ?? usage?.cache_write_input_tokens
-      ?? usage?.cache_creation_tokens,
-  ));
-  const out = { input_tokens: prompt - cached - written, output_tokens: tokenCount(usage?.completion_tokens ?? usage?.output_tokens) };
-  if (cached) out.cache_read_input_tokens = cached;
-  if (written) out.cache_creation_input_tokens = written;
+  if (!usage || typeof usage !== 'object') return {};
+  const hasPrompt = usage.prompt_tokens != null || usage.input_tokens != null;
+  const hasOutput = usage.completion_tokens != null || usage.output_tokens != null;
+  const read = firstTokenCount(usage, CACHE_READ_PATHS);
+  const write = firstTokenCount(usage, CACHE_WRITE_PATHS);
+  if (!hasPrompt && !hasOutput && !read.reported && !write.reported) return {};
+
+  const out = {};
+  if (hasPrompt) {
+    const prompt = tokenCount(usage.prompt_tokens ?? usage.input_tokens);
+    const cached = Math.min(prompt, read.value);
+    const written = Math.min(prompt - cached, write.value);
+    out.input_tokens = prompt - cached - written;
+    // 明确上报（含 0）才输出缓存字段：未上报与上报 0 不能混淆，累计 usage 才能用 0 覆盖旧正值。
+    if (read.reported) out.cache_read_input_tokens = cached;
+    if (write.reported) out.cache_creation_input_tokens = written;
+  } else {
+    // 没有总输入就不拆分、不编造 input_tokens；只保留明确上报的合法缓存读写。
+    if (read.reported) out.cache_read_input_tokens = read.value;
+    if (write.reported) out.cache_creation_input_tokens = write.value;
+  }
+  if (hasOutput) out.output_tokens = tokenCount(usage.completion_tokens ?? usage.output_tokens);
   return out;
+}
+
+// 多段 usage 里需要逐字段浅合并的 details 对象，避免后到的分段整体覆盖丢掉先到的缓存字段。
+const USAGE_DETAIL_KEYS = ['input_tokens_details', 'prompt_tokens_details', 'output_tokens_details', 'completion_tokens_details'];
+
+/** 合并同一响应的多段 OpenAI usage：只覆盖非 null/undefined 字段（显式 0 也覆盖），details 逐字段合并。 */
+export function mergeOpenAIUsage(prev, next) {
+  const merged = { ...(prev ?? {}) };
+  if (!next || typeof next !== 'object') return merged;
+  for (const [key, value] of Object.entries(next)) {
+    if (value == null) continue;
+    if (USAGE_DETAIL_KEYS.includes(key) && typeof value === 'object' && !Array.isArray(value)) {
+      const base = merged[key];
+      const detail = { ...(base && typeof base === 'object' ? base : {}) };
+      for (const [field, fieldValue] of Object.entries(value)) if (fieldValue != null) detail[field] = fieldValue;
+      merged[key] = detail;
+    } else {
+      merged[key] = value;
+    }
+  }
+  return merged;
 }
 
 /** 把 OpenAI 的完成结果转回 Anthropic Messages 响应体 */
@@ -198,7 +329,7 @@ export function toAnthropicResponse(oai, requestedModel) {
 
 export function buildOpenAIHeaders(provider, incomingHeaders = {}, options = {}) {
   if (resolveClientProfile(provider, options.targetModel, options.clientProfile, incomingHeaders) === 'codex') {
-    const context = options.codexContext ?? createCodexContext(options.targetModel ?? '', provider.codexReasoningEffort);
+    const context = options.codexContext ?? createRequestProfile(provider, options.targetModel ?? '', options.clientProfile, incomingHeaders).codexContext;
     return buildCodexHeaders(provider, context);
   }
   return withExtraHeaders({
@@ -210,10 +341,11 @@ export function buildOpenAIHeaders(provider, incomingHeaders = {}, options = {})
 
 export async function callOpenAI(provider, body, targetModel, signal, incomingHeaders = {}, options = {}) {
   const url = `${provider.baseUrl}/chat/completions`;
+  const outgoing = buildOpenAIBody(body, targetModel);
   const res = await upstreamFetch(provider, url, {
     method: 'POST',
     headers: buildOpenAIHeaders(provider, incomingHeaders, { ...options, targetModel }),
-    body: JSON.stringify(buildOpenAIBody(body, targetModel)),
+    body: JSON.stringify(outgoing),
     signal,
   });
   return res;
@@ -295,8 +427,8 @@ export async function parseCompletion(upstreamRes) {
     bufferedChars += JSON.stringify(j).length;
     if (bufferedChars > 64 * 1024 * 1024) throw new Error('上游 SSE 累计响应超过缓冲上限');
     if (j.id) merged.id = j.id;
-    // 整体合并，保留 prompt_tokens_details.cached_tokens 等缓存字段
-    if (j.usage) merged.usage = { ...merged.usage, ...j.usage };
+    // 逐字段合并，保留先前分段里的 prompt_tokens_details.cached_tokens 等缓存字段
+    if (j.usage) merged.usage = mergeOpenAIUsage(merged.usage, j.usage);
     const choice = j.choices?.find((c) => (c.index ?? 0) === 0);
     if (!choice) continue;
     const delta = choice.delta ?? {};

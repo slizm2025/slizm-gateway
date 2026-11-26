@@ -3,14 +3,25 @@
 // （请求头见 providers/client-headers.js）。只有确实与某个模型系列冲突的部分，才在这里
 // 按"系列"做例外——之后新增同系列模型不需要再单独配置，其它系列也不受影响。
 
-// Gemini 系列经 Antigravity（Google）转发时，system prompt 里的 Claude 身份句
-// （例如子 agent 首行 "You are a Claude agent, built on Anthropic's Claude Agent SDK."）
-// 会被 Google 拒绝，返回不带细节的 429 RESOURCE_EXHAUSTED（2026-09-24 实测，改写后 200）。
-// Codex 的 instructions 首行 "You are Codex, a coding agent based on GPT-5." 同样被拒（2026-09-25 实测）。
-// 句中 "GPT-5.1" 这类后面紧跟非空白的点不算句末。
-const GEMINI_SERIES = /(^|\/)gemini-/i;
+// Gemini 系列经 Antigravity（Google）转发时，system prompt 里的第三方身份句与 Harness 特征
+// 会被 Google 风控拒绝，返回不带细节的 429 RESOURCE_EXHAUSTED：
+// - Claude Code 子 agent 首行 "You are a Claude agent, built on Anthropic's Claude Agent SDK."（2026-09-24 实测）
+// - Codex 的 instructions 首行 "You are Codex, a coding agent based on GPT-5."（2026-09-25 实测）
+// - DeepSeek Harness 首行 "You are an AI agent powered by DeepSeek Harness." 以及后续段落中的
+//   "DeepSeek Harness"（2026-11-25 实测，替换后 200；仅删首行但保留后文 "DeepSeek Harness" 仍 429）
+// 句中 "GPT-5.1"、"deepseek-v4.1" 这类后面紧跟非空白的点不算句末。
+const GEMINI_SERIES = /(^|[/.])gemini(?:-|$)/i;
 const VENDOR_IDENTITY = /You are [^.\n]*(?:Claude|Anthropic|Codex|ChatGPT|GPT|OpenAI)(?:[^.\n]|\.(?=\S))*\./g;
+// DeepSeek 身份句只匹配自我介绍，避免误吞 "You are interacting with the user through the DeepSeek Harness Web GUI at ..." 里的 URL 上下文
+const DEEPSEEK_IDENTITY = /You are (?:DeepSeek\b|(?:a |an )?(?:AI |coding )?(?:agent|assistant)[^.\n]*DeepSeek)(?:[^.\n]|\.(?=\S))*\./gi;
+// 仅替换正文里的空格分词品牌名，不改写文件系统路径（如 ...\deepseek-harness）或代码标识符
+const HARNESS_BRAND = /\bDeepSeek\s+Harness\b/gi;
+// DeepSeek Harness Web GUI 段落里的固定原句同样会被 Google 识别为第三方 Harness 指纹
+// （2026-11-25 实测单句 6/6 返回 429，同义改写后完整 20 段提示词返回 200）
+const HARNESS_WEB_CONTEXT = /The browser provides no implicit DOM, route, or screenshot context\./gi;
 const NEUTRAL_IDENTITY = 'You are an AI coding agent.';
+const NEUTRAL_HARNESS = 'Agent Harness';
+const NEUTRAL_WEB_CONTEXT = 'No browser DOM, route, or screenshot state is attached automatically.';
 
 // Claude 系列会校验 thinking 块的签名。网关把 OpenAI 类上游的 reasoning 转成了 thinking 块，这些块没有签名；
 // 同一会话从 gpt / deepseek 切回 Claude 路由时，带着它们的历史会被上游 400 拒绝。
@@ -25,6 +36,13 @@ export function modelSeries(model) {
   if (CLAUDE_SERIES.test(name)) return 'claude';
   if (OPENAI_SERIES.test(name)) return 'openai';
   return null;
+}
+
+export function messagesTransportFor(provider, upstreamModel) {
+  const transport = provider.messagesTransport ?? 'auto';
+  return provider.apiType === 'openai' && transport === 'auto'
+    ? modelSeries(upstreamModel) === 'openai' ? 'responses' : 'chat-completions'
+    : transport;
 }
 
 const isUnsignedThinking = (block) => block?.type === 'thinking' && !block.signature;
@@ -45,13 +63,21 @@ function dropUnsignedThinking(body) {
   return { ...body, messages };
 }
 
+function rewriteSystemText(text) {
+  return text
+    .replace(VENDOR_IDENTITY, NEUTRAL_IDENTITY)
+    .replace(DEEPSEEK_IDENTITY, NEUTRAL_IDENTITY)
+    .replace(HARNESS_BRAND, NEUTRAL_HARNESS)
+    .replace(HARNESS_WEB_CONTEXT, NEUTRAL_WEB_CONTEXT);
+}
+
 // 兼容 Anthropic 的 text 块和 Responses 的 input_text 块
 function rewriteIdentity(content) {
-  if (typeof content === 'string') return content.replace(VENDOR_IDENTITY, NEUTRAL_IDENTITY);
+  if (typeof content === 'string') return rewriteSystemText(content);
   if (!Array.isArray(content)) return content;
   return content.map((b) =>
     (b?.type === 'text' || b?.type === 'input_text') && typeof b.text === 'string'
-      ? { ...b, text: b.text.replace(VENDOR_IDENTITY, NEUTRAL_IDENTITY) }
+      ? { ...b, text: rewriteSystemText(b.text) }
       : b,
   );
 }

@@ -43,13 +43,13 @@ const C = {
   cyan: '\u001b[36m',
   bold: '\u001b[1m',
 };
-const paint = (c, s) => `${c}${s}${C.reset}`;
+const paint = (c, s) => colorsEnabled() ? `${c}${s}${C.reset}` : String(s);
 // Compact logs use one-line mascots. Legacy aliases keep old log files readable.
 const CLIENT_MASCOTS = Object.freeze({
   'claude-code': Object.freeze({ name: 'Claude', badge: '▗[•.•]▖', color: '\x1b[38;2;215;119;87m', aliases: ['▗[•.•]▖', '▗[•..•]▖', '✦'] }),
   codex: Object.freeze({ name: 'Codex', badge: '◖⚆ᴥ⚆◗', color: '\x1b[38;2;14;165;233m', aliases: ['◖⚆ᴥ⚆◗', '◈'] }),
   deepseek: Object.freeze({ name: 'DeepSeek', badge: '~(·)><', color: '\x1b[38;2;30;136;229m', aliases: ['~(·)><', '~(· )><', '◆'] }),
-  'deepseek-harness': Object.freeze({ name: 'DeepSeek Harness', badge: '~(·)><', color: '\x1b[38;2;30;136;229m', aliases: ['⬢[DSH]⬢', '⬢'] }),
+  'deepseek-harness': Object.freeze({ name: 'DeepSeek Harness', badge: '⬢[DSH]⬢', color: '\x1b[38;2;30;136;229m', aliases: ['⬢[DSH]⬢', '⬢'] }),
   gemini: Object.freeze({ name: 'Gemini', badge: '▼(ᴥ)▼', color: '\x1b[38;2;168;85;247m', aliases: ['▼(ᴥ)▼', '▼(´ᴥ`)▼'] }),
   unknown: Object.freeze({ name: 'Unknown', badge: '◇', color: '\x1b[38;2;148;163;184m', aliases: ['◇[client]◇', '·?·', '◇'] }),
 });
@@ -80,6 +80,10 @@ function atomicWrite(path, content) {
 const HOST = readEnvValue('GATEWAY_HOST', '127.0.0.1');
 const PORT = Number(readEnvValue('GATEWAY_PORT', '4000'));
 const BASE = `http://${HOST}:${PORT}`;
+
+function webEnabled() {
+  return readEnvValue('GATEWAY_WEB_ENABLED', '1') !== '0';
+}
 
 /** 读取 pid 文件并确认进程还活着 */
 function readPid() {
@@ -117,6 +121,47 @@ async function health() {
   } catch {
     return null;
   }
+}
+
+async function statusSnapshot() {
+  const pidFilePid = readPid();
+  const info = await health();
+  const running = info?.service === 'slizm-gateway';
+  const startedAt = running && typeof info.startedAt === 'string' ? Date.parse(info.startedAt) : NaN;
+  let sourceChanged = !Number.isFinite(startedAt);
+  if (!sourceChanged) {
+    const sourceFiles = readdirSync(join(ROOT, 'src'), { recursive: true }).filter((p) => p.endsWith('.js'));
+    sourceChanged = sourceFiles.some((p) => statSync(join(ROOT, 'src', p)).mtimeMs > startedAt + 1000);
+  }
+  let web = { running: false, pid: null, port: null, url: null, stale: false };
+  try {
+    const { getWebStatus } = await import('../src/admin/lifecycle.js');
+    web = await getWebStatus();
+  } catch (error) {
+    web.error = error.message;
+  }
+  return {
+    gateway: {
+      running,
+      pid: running ? info.pid : null,
+      pidFilePid,
+      url: running ? BASE : null,
+      activeRequests: running ? Number(info.activeRequests ?? 0) : 0,
+      uptimeSec: running ? Number(info.uptimeSec ?? 0) : 0,
+      startedAt: running ? info.startedAt ?? null : null,
+      transport: running ? info.transport ?? null : null,
+      sourceChanged: running ? sourceChanged : false,
+    },
+    web: {
+      enabled: webEnabled(),
+      running: Boolean(web.running),
+      pid: web.pid ?? null,
+      port: web.port ?? null,
+      url: web.url ?? null,
+      stale: Boolean(web.stale),
+      ...(web.error ? { error: web.error } : {}),
+    },
+  };
 }
 
 const ARCHIVE = join(LOGS, 'archive');
@@ -224,13 +269,29 @@ function cmdCleanLogs() {
   catch (error) { console.error(`日志清理参数错误：${error.message}`); process.exitCode = 1; }
 }
 
-async function cmdStart() {
+async function cmdStart({ manageWeb = true, strictWeb = false } = {}) {
   const existing = readPid();
   if (existing) {
-    console.log(paint(C.yellow, `网关已在运行 (pid ${existing})`));
-    await cmdStatus();
-    if (!process.exitCode) await startManagementWeb();
-    return;
+    const info = await health();
+    if (info?.service === 'slizm-gateway' && info.pid === existing) {
+      console.log(paint(C.yellow, `网关已在运行 (pid ${existing})`));
+      await printStatus();
+      if (!process.exitCode && manageWeb) await startManagementWeb({ strict: strictWeb });
+      return;
+    }
+    if (info?.service === 'slizm-gateway') {
+      console.log(paint(C.yellow, `网关已在运行 (pid ${info.pid})，但不是 pid 文件记录的进程。`));
+      await printStatus();
+      if (!process.exitCode && manageWeb) await startManagementWeb({ strict: strictWeb });
+      return;
+    }
+    if (await portInUse(HOST, PORT)) {
+      console.log(paint(C.red, `端口 ${PORT} 已被其他服务占用。`));
+      process.exitCode = 1;
+      return;
+    }
+    rmSync(PID_FILE, { force: true });
+    console.log(paint(C.yellow, `已清理失效的 pid 文件 (${existing})，继续启动。`));
   }
   if (await portInUse(HOST, PORT)) {
     console.log(
@@ -295,19 +356,53 @@ async function cmdStart() {
   ].map((row) => `${cClaude}${row.padEnd(22)}${cReset}`);
   banner[0] += `  ${paint(C.green, `✓ 网关已启动 (pid ${child.pid})  ${BASE}`)}`;
   banner[1] += '  管理: node scripts/gw.js status · 日志: logs/gateway.out.log';
-  banner[2] += `  Clients: ${cClaude}▗[•..•]▖${cReset} Claude · ${cCodex}◖⚆ᴥ⚆◗${cReset} Codex · ${cWhale}~(· )><${cReset} DeepSeek · ${cGemini}▼(´ᴥ\`)▼${cReset} Gemini`;
+  banner[2] += `  Clients: ${cClaude}▗[•..•]▖${cReset} Claude · ${cCodex}◖⚆ᴥ⚆◗${cReset} Codex · ${cWhale}⬢[DSH]⬢${cReset} DeepSeek Harness · ${cWhale}~(· )><${cReset} DeepSeek · ${cGemini}▼(´ᴥ\`)▼${cReset} Gemini`;
   console.log(banner.join('\n'));
-  await startManagementWeb();
+  if (manageWeb) await startManagementWeb({ strict: strictWeb });
 }
 
-async function startManagementWeb() {
-  if (readEnvValue('GATEWAY_WEB_ENABLED', '1') === '0') return;
+async function startManagementWeb({ open = false, strict = false } = {}) {
+  if (!webEnabled()) return null;
   try {
     const { ensureWeb } = await import('../src/admin/lifecycle.js');
-    const web = await ensureWeb();
-    console.log(`  管理 Web: ${web.url}  (node scripts/gw.js web 打开并登录)`);
+    const web = await ensureWeb({ open });
+    console.log(`  管理 Web: ${web.url}  ${web.started ? '已启动' : '运行中'}${open ? ' · 已打开浏览器' : ''}`);
+    return web;
   } catch (error) {
-    console.log(paint(C.yellow, `  网关已运行，但 ${error.message}`));
+    const message = `  网关已运行，但管理 Web 无法就绪：${error.message}`;
+    console[strict ? 'error' : 'log'](paint(C.red, message));
+    if (strict) process.exitCode = 1;
+    return null;
+  }
+}
+
+async function cmdUp() {
+  const args = process.argv.slice(3);
+  if (args.some((arg) => arg !== '--no-open') || args.length > 1) {
+    console.error('用法: node scripts/gw.js up [--no-open]');
+    process.exitCode = 1;
+    return;
+  }
+  await cmdStart({ manageWeb: false });
+  if (process.exitCode) return;
+  if (!webEnabled()) {
+    console.log(paint(C.yellow, 'GATEWAY_WEB_ENABLED=0，仅启动网关。'));
+    return;
+  }
+  const web = await startManagementWeb({ open: !args.includes('--no-open'), strict: true });
+  if (web) console.log(paint(C.green, `✓ 一键启动完成 · Web ${web.url}`));
+}
+
+async function cmdDown() {
+  await cmdStop();
+  if (process.exitCode) return;
+  try {
+    const { stopWeb } = await import('../src/admin/lifecycle.js');
+    const stopped = await stopWeb();
+    console.log(stopped ? '管理 Web 已停止。' : '管理 Web 本来就没在运行。');
+  } catch (error) {
+    console.error(`管理 Web 停止失败：${error.message}`);
+    process.exitCode = 1;
   }
 }
 
@@ -326,8 +421,26 @@ async function cmdWeb() {
     }
     const shouldOpen = !args.includes("--no-open");
     const web = await ensureWeb({ open: shouldOpen });
-    const hint = shouldOpen ? "已自动打开并登录；手动复制此地址不会带登录凭据" : "仅启动服务，手动打开此地址不会自动登录；请不带 --no-open 重新执行以自动登录";
+    const hint = shouldOpen
+      ? "后台常驻运行，关闭网页不影响服务；可随时重新访问此地址"
+      : "后台常驻运行，关闭终端或网页均不影响服务；可随时在浏览器打开访问";
     console.log("管理 Web: " + web.url + "（" + hint + "）");
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
+}
+
+async function cmdOpen() {
+  if (process.argv.length > 3) {
+    console.error('用法: node scripts/gw.js open');
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const { ensureWeb } = await import('../src/admin/lifecycle.js');
+    const web = await ensureWeb({ open: true });
+    console.log(`管理 Web 已打开：${web.url}`);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
@@ -391,15 +504,37 @@ async function cmdStop() {
 }
 
 async function cmdRestart() {
+  const args = process.argv.slice(3);
+  if (args.some((arg) => arg !== '--all') || args.length > 1) {
+    console.error('用法: node scripts/gw.js restart [--all]');
+    process.exitCode = 1;
+    return;
+  }
+  const restartWeb = args.includes('--all');
   await cmdStop();
   if (process.exitCode) return;
+  if (restartWeb) {
+    try {
+      const { stopWeb } = await import('../src/admin/lifecycle.js');
+      await stopWeb();
+    } catch (error) {
+      console.error(`管理 Web 停止失败：${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
   for (let n = 0; n < 40 && await portInUse(HOST, PORT); n++) await new Promise((r) => setTimeout(r, 100));
-  await cmdStart();
+  await cmdStart({ strictWeb: restartWeb });
 }
 
-async function cmdStatus() {
-  const pid = readPid();
-  const info = await health();
+async function printStatus({ json = false } = {}) {
+  const snapshot = await statusSnapshot();
+  if (json) {
+    console.log(JSON.stringify(snapshot, null, 2));
+    return;
+  }
+  const info = snapshot.gateway.running ? await health() : null;
+  const pid = snapshot.gateway.pidFilePid;
   const line = '─'.repeat(64);
   console.log(line);
   if (!info) {
@@ -411,9 +546,8 @@ async function cmdStatus() {
   console.log(`  状态: ${paint(C.green, '运行中')}  pid ${pid ?? '未知'}  已运行 ${info.uptimeSec}s`);
   console.log(`  地址: ${BASE}`);
   console.log(`  传输: ${info.transport ?? '旧版（无版本标记）'}`);
-  const sourceFiles = readdirSync(join(ROOT, 'src'), { recursive: true }).filter((p) => p.endsWith('.js'));
-  const changed = sourceFiles.some((p) => statSync(join(ROOT, 'src', p)).mtimeMs > Date.parse(info.startedAt ?? '') + 1000);
-  if (!info.startedAt || changed) console.log(paint(C.yellow, '  ⚠ 源码可能比运行进程更新，请在请求完成后重启网关。'));
+  if (snapshot.gateway.sourceChanged) console.log(paint(C.yellow, '  ⚠ 源码可能比运行进程更新，请在请求完成后重启网关。'));
+  console.log(`  管理 Web: ${snapshot.web.running ? paint(C.green, '运行中') : paint(C.red, '未运行')}${snapshot.web.url ? `  ${snapshot.web.url}` : ''}${snapshot.web.stale ? paint(C.yellow, ' (状态文件已过期)') : ''}`);
   console.log(line);
   console.log('  模型路由:');
   for (const [alias, target] of Object.entries(info.routes ?? {})) {
@@ -425,6 +559,16 @@ async function cmdStatus() {
     console.log(`    ${String(p.name).padEnd(12)} ${String(p.apiType).padEnd(10)} ${p.baseUrl}`);
   }
   console.log(line);
+}
+
+async function cmdStatus() {
+  const args = process.argv.slice(3);
+  if (args.some((arg) => arg !== '--json') || args.length > 1) {
+    console.error('用法: node scripts/gw.js status [--json]');
+    process.exitCode = 1;
+    return;
+  }
+  await printStatus({ json: args.includes('--json') });
 }
 
 const PROBLEM = / ✗ | ⚠ | ↻ | 异常: | 上游错误 | 流式失败| 上游抖动/;
@@ -909,6 +1053,84 @@ async function cmdHealth() {
   console.log(JSON.stringify(info, null, 2));
 }
 
+function resolveAutostartDir() {
+  const override = env('GATEWAY_AUTOSTART_DIR');
+  if (override) return resolve(override);
+  if (process.platform !== 'win32') return null;
+  const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+  return join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+}
+
+function vbsEscape(value) {
+  return String(value).replace(/"/g, '""');
+}
+
+function buildAutostartVbs(rootDir, nodePath) {
+  const safeRoot = vbsEscape(rootDir);
+  const safeNode = vbsEscape(nodePath);
+  return [
+    "' Slizm Gateway background autostart (generated by scripts/gw.js autostart on).",
+    "' Starts both gateway and management Web detached without opening a browser or console window.",
+    'Option Explicit',
+    'Dim shell, fso, root, logDir, logPath, nodeExe, inner',
+    'Set shell = CreateObject("WScript.Shell")',
+    'Set fso = CreateObject("Scripting.FileSystemObject")',
+    `root = "${safeRoot}"`,
+    `nodeExe = "${safeNode}"`,
+    'If Not fso.FolderExists(root) Then WScript.Quit 0',
+    'If Not fso.FileExists(nodeExe) Then nodeExe = "node.exe"',
+    'logDir = fso.BuildPath(root, "logs")',
+    'If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir',
+    'logPath = fso.BuildPath(logDir, "autostart.log")',
+    'shell.CurrentDirectory = root',
+    'inner = """" & nodeExe & """ """ & fso.BuildPath(root, "scripts\\gw.js") & """ up --no-open > """ & logPath & """ 2>&1"',
+    'shell.Run """" & shell.ExpandEnvironmentStrings("%ComSpec%") & """ /d /s /c """ & inner & """", 0, True',
+    '',
+  ].join('\r\n');
+}
+
+async function cmdAutostart() {
+  const args = process.argv.slice(3);
+  const action = (args[0] ?? 'status').toLowerCase();
+  if (args.length > 1 || !['on', 'off', 'status'].includes(action)) {
+    console.error('用法: node scripts/gw.js autostart [on | off | status]');
+    process.exitCode = 1;
+    return;
+  }
+  const dir = resolveAutostartDir();
+  if (!dir) {
+    console.error('当前平台暂不支持 Windows 启动目录自启（可配合系统计划任务或 systemd 执行 `node scripts/gw.js up --no-open`）。');
+    process.exitCode = 1;
+    return;
+  }
+  const filePath = join(dir, 'SlizmGateway.vbs');
+  if (action === 'status') {
+    const enabled = existsSync(filePath);
+    const content = enabled ? readFileSync(filePath, 'utf8') : '';
+    const matchesRoot = enabled && content.includes(`root = "${vbsEscape(ROOT)}"`);
+    console.log(`  开机自启: ${enabled ? paint(C.green, '已开启') : paint(C.dim, '未开启')}`);
+    console.log(`  启动脚本: ${filePath}`);
+    if (enabled && !matchesRoot) {
+      console.log(paint(C.yellow, '  ⚠ 启动脚本指向其他目录，建议重新执行 `node scripts/gw.js autostart on` 更新。'));
+    }
+    return;
+  }
+  if (action === 'on') {
+    mkdirSync(dir, { recursive: true });
+    const script = buildAutostartVbs(ROOT, process.execPath);
+    atomicWrite(filePath, script);
+    console.log(paint(C.green, '✓ 已开启开机后台自启（登录后静默启动网关与管理 Web，不弹黑框与浏览器）'));
+    console.log(paint(C.dim, `  启动脚本: ${filePath}`));
+    return;
+  }
+  if (!existsSync(filePath)) {
+    console.log(paint(C.dim, '开机自启本来就未开启。'));
+    return;
+  }
+  rmSync(filePath, { force: true });
+  console.log(paint(C.green, '✓ 已关闭开机自启'));
+}
+
 function cmdHelp() {
   const logHint = existsSync(OUT_LOG)
     ? ` (最后写入 ${statSync(OUT_LOG).mtime.toLocaleString()})`
@@ -916,10 +1138,17 @@ function cmdHelp() {
   console.log(`
   网关管理 — ${paint(C.cyan, BASE)}
 
+    node scripts/gw.js up         一键启动网关 + Web（默认打开管理页）
+    node scripts/gw.js up --no-open  一键启动但不打开浏览器
+    node scripts/gw.js down       停止网关 + Web
+    node scripts/gw.js open       打开（必要时启动）管理 Web
+    node scripts/gw.js autostart [on|off|status]  开机静默后台自启（网关 + Web）
     node scripts/gw.js start      后台启动（幂等，已在跑则只报告）
     node scripts/gw.js stop       停止
-    node scripts/gw.js restart    重启
+    node scripts/gw.js restart    仅重启网关
+    node scripts/gw.js restart --all  重启网关 + Web
     node scripts/gw.js status     状态 + 路由表
+    node scripts/gw.js status --json  供控制面板读取的机器状态
     node scripts/gw.js web        打开本地管理 Web（自动登录）
     node scripts/gw.js web --no-open   仅启动管理 Web
     node scripts/gw.js web --stop      仅停止管理 Web
@@ -948,6 +1177,10 @@ function cmdHelp() {
 
 const cmd = (process.argv[2] ?? 'help').toLowerCase();
 const table = {
+  up: cmdUp,
+  down: cmdDown,
+  open: cmdOpen,
+  autostart: cmdAutostart,
   start: cmdStart,
   stop: cmdStop,
   restart: cmdRestart,

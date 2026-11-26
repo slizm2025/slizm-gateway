@@ -1,5 +1,5 @@
 // OpenAI SSE -> Anthropic SSE, pulled by the downstream consumer.
-import { toAnthropicResponse, parseToolInput, anthropicUsageFromOpenAI } from './providers/openai.js';
+import { toAnthropicResponse, parseToolInput, anthropicUsageFromOpenAI, mergeOpenAIUsage } from './providers/openai.js';
 import { openAIChunks } from './sse.js';
 
 const enc = new TextEncoder();
@@ -45,12 +45,13 @@ export function openAIToAnthropicStream(upstreamBody, requestedModel, options = 
     try {
       for await (const value of openAIChunks(input)) {
         if (value.usage) {
-          upstreamUsage = { ...upstreamUsage, ...value.usage };
+          upstreamUsage = mergeOpenAIUsage(upstreamUsage, value.usage);
           usage = anthropicUsageFromOpenAI(upstreamUsage);
           try { options.onUsage?.(usage); } catch { /* Usage reporting must not affect the stream. */ }
         }
         const choice = value.choices?.find((c) => (c.index ?? 0) === 0);
         if (!choice) continue;
+        // openAIChunks 保证至少出现一个选择块，所以 message_start 一定先于任何内容事件。
         if (!started) {
           started = true;
           yield sse('message_start', { type: 'message_start', message: {
@@ -84,6 +85,14 @@ export function openAIToAnthropicStream(upstreamBody, requestedModel, options = 
         }
       }
       if (open) yield sse('content_block_stop', { type: 'content_block_stop', index: open.index });
+      // Anthropic 保证至少一个内容块；零块 + end_turn 会让 DeepSeek Harness 的
+      // translate() 直接按 EMPTY_RESPONSE 报错，所以完全没有内容时补一个空文本块。
+      // 只有工具调用的完成本来就有一个 tool_use 块，不能凭空多出文本块。
+      if (nextIndex === 0 && tools.size === 0) {
+        yield sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+        yield sse('content_block_stop', { type: 'content_block_stop', index: 0 });
+        nextIndex = 1;
+      }
       // Anthropic requires a complete immutable tool name at block_start.
       // Buffer tool fragments until complete; text remains incremental.
       for (const tool of tools.values()) {

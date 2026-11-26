@@ -468,6 +468,7 @@ test('端到端：OpenAI 兼容与 native Responses 显式 cache_write_tokens �
       {
         name: 'provider-openai-compat',
         apiType: 'openai',
+        messagesTransport: 'chat-completions',
         apiKey: 'key-oai',
         baseUrl: `http://127.0.0.1:${upPort}/v1`,
         priceMultipliers: {

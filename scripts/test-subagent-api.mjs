@@ -58,15 +58,17 @@ test('model checks use each client protocol, cache failures, and invalidate on c
     return new Response('data: ' + JSON.stringify({ type }) + '\n\n');
   } });
   assert.equal(models.list('claude')[0].status, 'unchecked');
-  assert.equal(models.list('claude')[0].available, false);
+  assert.equal(models.list('claude')[0].available, true);
+  assert.doesNotThrow(() => models.validate('claude', 'fast'));
   assert.equal((await models.check('claude'))[0].status, 'ok');
   assert.equal(JSON.parse(calls[0].options.body).stream, true);
   assert.ok(calls[0].url.endsWith('/v1/messages'));
   assert.equal((await models.check('codex'))[0].status, 'ok');
   assert.ok(calls.some((call) => call.url.endsWith('/v1/responses')));
   failed = true;
-  assert.equal((await models.check('codex'))[0].available, false);
-  assert.throws(() => models.validate('codex', 'fast'), /HTTP 403/);
+  assert.equal((await models.check('codex'))[0].available, true);
+  assert.equal(models.list('codex')[0].checkReason, '网关返回 HTTP 403');
+  assert.doesNotThrow(() => models.validate('codex', 'fast'));
   assert.doesNotThrow(() => models.validate('claude', 'inherit'));
   assert.throws(() => models.validate('codex', 'inherit'));
   const config = JSON.parse(await readFile(f.configPath, 'utf8'));
@@ -80,7 +82,7 @@ test('model checks reject truncated streams and incomplete response events', asy
   const f = await fixture(t);
   for (const body of ['data: {"type":"response.created"}\n\n', 'data: {"type":"response.incomplete"}\n\n', 'data: {"type":"response.completed"}']) {
     const models = createSubagentModels({ configPath: f.configPath, verifyGateway: async () => {}, fetchImpl: async () => new Response(body) });
-    assert.equal((await models.check('codex'))[0].available, false);
+    assert.equal((await models.check('codex'))[0].available, true);
   }
   const capped = createSubagentModels({ configPath: f.configPath, verifyGateway: async () => {}, fetchImpl: async () => new Response('data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"output_tokens":96}}}\n\n') });
   assert.equal((await capped.check('codex'))[0].status, 'ok');
@@ -99,7 +101,7 @@ test('model probe history survives service restart and expires without another p
   assert.equal(calls, checkedCalls);
   assert.ok(!(await readFile(cachePath, 'utf8')).includes('secret-not-for-browser'));
   const expired = createSubagentModels({ configPath: f.configPath, verifyGateway: async () => {}, cachePath, fetchImpl, cacheTtlMs: -1 });
-  assert.equal(expired.list('claude')[0].available, false);
+  assert.equal(expired.list('claude')[0].available, true);
   assert.equal(expired.list('claude')[0].status, 'unchecked');
 });
 
@@ -124,8 +126,9 @@ test('model detection rejects an old running route configuration before any paid
 test('subagent API requires session and same origin, saves real files, and rejects stale or unsafe writes', async (t) => {
   const f = await fixture(t);
   const secret = 'a'.repeat(64);
+  let probeCalls = 0;
   const server = createAdminServer({ ...f, backupDir: join(f.root, 'backups'), stateDir: f.root, logDir: f.root, ledgerDir: null, sessionSecret: secret,
-    subagentModelOptions: { verifyGateway: async () => {}, fetchImpl: async () => new Response('data: {"type":"message_stop"}\n\n') },
+    subagentModelOptions: { verifyGateway: async () => {}, fetchImpl: async () => { probeCalls++; return new Response('data: {"type":"message_stop"}\n\n'); } },
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => { server.closeAllConnections(); return new Promise((resolve) => server.close(resolve)); });
@@ -139,18 +142,22 @@ test('subagent API requires session and same origin, saves real files, and rejec
   assert.ok(agent);
   assert.ok(!JSON.stringify(data).includes('secret-not-for-browser'));
   const path = '/api/subagents/claude/' + encodeURIComponent(agent.id);
-  const body = { ...agent, description: 'Updated description' };
+  const body = { ...agent, description: 'Updated description', model: 'mapped' };
   assert.equal((await request(path, 'PUT', body, 'http://evil.test')).status, 403);
   assert.equal((await request(path, 'PUT', { ...body, revision: 'stale' })).status, 409);
   const saved = await request(path, 'PUT', body);
   assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(probeCalls, 0, 'saving an agent model does not trigger a probe');
   assert.match(await readFile(join(f.claudeHome, 'agents', 'reviewer.md'), 'utf8'), /Updated description/);
+  assert.match(await readFile(join(f.claudeHome, 'agents', 'reviewer.md'), 'utf8'), /model: mapped/);
   assert.notEqual((await saved.json()).agents.find((a) => a.id === agent.id).revision, agent.revision);
   const unsafe = await request('/api/subagents/claude/..%5Coutside', 'PUT', body);
   assert.ok([400, 404].includes(unsafe.status));
   assert.equal((await request('/api/subagents?tool=other')).status, 400);
-  assert.equal((await request('/api/subagents/claude/check-models', 'POST', {})).status, 200);
-  const defaults = await request('/api/subagents/claude/defaults', 'PUT', { revision: data.defaults.revision, model: 'fast', effort: null });
+  const defaults = await request('/api/subagents/claude/defaults', 'PUT', { revision: data.defaults.revision, model: 'mapped', effort: null });
   assert.equal(defaults.status, 200, await defaults.clone().text());
-  assert.equal(JSON.parse(await readFile(join(f.claudeHome, 'settings.json'), 'utf8')).env.CLAUDE_CODE_SUBAGENT_MODEL, 'fast');
+  assert.equal(probeCalls, 0, 'saving the default model does not trigger a probe');
+  assert.equal(JSON.parse(await readFile(join(f.claudeHome, 'settings.json'), 'utf8')).env.CLAUDE_CODE_SUBAGENT_MODEL, 'mapped');
+  assert.equal((await request('/api/subagents/claude/check-models', 'POST', {})).status, 200);
+  assert.ok(probeCalls > 0, 'explicit detection is still available');
 });

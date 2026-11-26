@@ -108,16 +108,47 @@ const SAFE_RETRY_CODES = new Set([
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
 
-/** fetch 把底层原因包在 cause 里（可能多层，或是 AggregateError），逐层收集错误码 */
-function causeCodes(e) {
+/** 逐层或遍历 AggregateError 提取错误码与错误信息，循环安全且有深度/数量上限 */
+export function extractCauseDetails(e, maxDepth = 5) {
   const codes = [];
-  for (let c = e, depth = 0; c && depth < 5; c = c.cause, depth++) {
-    if (typeof c.code === 'string') codes.push(c.code);
-    for (const sub of Array.isArray(c.errors) ? c.errors : []) {
-      if (typeof sub?.code === 'string') codes.push(sub.code);
+  const messages = [];
+  const seen = new Set();
+  const queue = [{ node: e, depth: 0 }];
+  while (queue.length > 0 && messages.length < 10) {
+    const { node, depth } = queue.shift();
+    if (!node || (typeof node !== 'object' && typeof node !== 'function')) continue;
+    if (seen.has(node) || depth > maxDepth) continue;
+    seen.add(node);
+    if (typeof node.code === 'string' && node.code && !codes.includes(node.code)) {
+      codes.push(node.code);
+    }
+    if (typeof node.message === 'string') {
+      const msg = node.message.trim();
+      if (msg && !messages.includes(msg)) {
+        messages.push(msg);
+      }
+    }
+    if (depth < maxDepth) {
+      if (node.cause) queue.push({ node: node.cause, depth: depth + 1 });
+      if (Array.isArray(node.errors)) {
+        for (const sub of node.errors) queue.push({ node: sub, depth: depth + 1 });
+      }
     }
   }
-  return codes;
+  return { codes, messages };
+}
+
+/** 提取格式化错误原因，包含外层与内层 cause/AggregateError 信息 */
+export function formatErrorMessage(e) {
+  if (!e) return '';
+  if (typeof e === 'string') return e;
+  const { messages } = extractCauseDetails(e);
+  if (!messages.length) return typeof e.message === 'string' ? e.message : String(e);
+  return messages.join(': ');
+}
+
+function causeCodes(e) {
+  return extractCauseDetails(e).codes;
 }
 
 /** 网络错误的底层错误码，供日志使用；没有时返回 undefined */

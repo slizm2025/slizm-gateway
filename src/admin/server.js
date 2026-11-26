@@ -1,6 +1,6 @@
 // Local Web Admin Backend for Slizm Gateway
 import http from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, renameSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +99,7 @@ function readJsonBody(req, res, maxBytes = MAX_BODY_BYTES) {
 
 export function createAdminServer(options = {}) {
   const stateDir = options.stateDir ?? env('GATEWAY_WEB_STATE_DIR', join(ROOT, 'logs'));
+  const instanceKey = createHash('sha256').update(resolve(stateDir)).digest('hex').slice(0, 16);
   const publicDir = options.publicDir ?? join(ROOT, 'src', 'admin', 'public');
   const configPath = options.configPath ?? env('GATEWAY_CONFIG', join(ROOT, 'providers.json'));
   const logDir = options.logDir !== undefined ? options.logDir : join(ROOT, 'logs');
@@ -174,6 +175,7 @@ export function createAdminServer(options = {}) {
       return jsonResponse(res, 200, {
         service: 'slizm-gateway-web',
         pid: process.pid,
+        instanceKey,
       });
     }
 
@@ -227,16 +229,24 @@ export function createAdminServer(options = {}) {
 
         const tokenBuf = Buffer.from(incomingToken);
         const secretBuf = Buffer.from(sessionSecret);
-        const isValid =
+        const localBootstrap = !authHeader &&
+          contentType.toLowerCase().startsWith('application/json') &&
+          (!req.headers['sec-fetch-site'] || req.headers['sec-fetch-site'] === 'same-origin');
+        const isValid = localBootstrap || (
           tokenBuf.length === secretBuf.length &&
-          timingSafeEqual(tokenBuf, secretBuf);
+          timingSafeEqual(tokenBuf, secretBuf)
+        );
 
         if (!isValid) {
           return errorResponse(res, 401, 'Invalid bootstrap token');
         }
 
+        const now = Date.now();
+        for (const [key, exp] of sessions) {
+          if (exp < now) sessions.delete(key);
+        }
         const sessionToken = randomBytes(32).toString('hex');
-        const expiresAt = Date.now() + cookieTtlMs;
+        const expiresAt = now + cookieTtlMs;
         sessions.set(sessionToken, expiresAt);
 
         const cookieValue = `${COOKIE_NAME}=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.round(cookieTtlMs / 1000)}`;
@@ -250,10 +260,20 @@ export function createAdminServer(options = {}) {
 
       const cookies = parseCookies(req.headers['cookie']);
       const currentToken = cookies[COOKIE_NAME];
+      const now = Date.now();
       const sessionExpiry = currentToken ? sessions.get(currentToken) : null;
-      if (!sessionExpiry || sessionExpiry < Date.now()) {
+      if (!sessionExpiry || sessionExpiry < now) {
         if (currentToken) sessions.delete(currentToken);
         return errorResponse(res, 401, 'Unauthorized');
+      }
+      // 活跃会话自动滑动续期，避免控制台长开或重开后莫名失效
+      if (sessionExpiry - now < cookieTtlMs / 2) {
+        const renewedAt = now + cookieTtlMs;
+        sessions.set(currentToken, renewedAt);
+        res.setHeader(
+          'set-cookie',
+          `${COOKIE_NAME}=${currentToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.round(cookieTtlMs / 1000)}`
+        );
       }
 
       if (pathname === '/api/subagents' || pathname.startsWith('/api/subagents/')) {
@@ -448,6 +468,11 @@ export function createAdminServer(options = {}) {
     }
   });
 
+  server.on('clientError', (err, socket) => {
+    if (err?.code === 'ECONNRESET' || !socket.writable) return;
+    socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+  });
+
   return server;
 }
 
@@ -463,6 +488,7 @@ if (isDirectRun) {
   }
   const host = '127.0.0.1';
   const stateDir = env('GATEWAY_WEB_STATE_DIR', join(ROOT, 'logs'));
+  const myInstanceKey = createHash('sha256').update(resolve(stateDir)).digest('hex').slice(0, 16);
   const sessionToken = randomBytes(32).toString('hex');
   const sessionFile = join(stateDir, 'web-session.json');
 
@@ -487,6 +513,12 @@ if (isDirectRun) {
   process.on('exit', cleanup);
   process.on('SIGINT', () => { cleanup(); process.exit(0); });
   process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+  process.on('unhandledRejection', (err) => {
+    console.error(`[${new Date().toISOString()}] 管理 Web 未处理的异步异常:`, redact(String(err?.stack ?? err)));
+  });
+  process.on('uncaughtExceptionMonitor', (err, origin) => {
+    console.error(`[${new Date().toISOString()}] 管理 Web 发生未捕获异常 (pid ${process.pid}, ${origin}):`, redact(String(err?.stack ?? err)));
+  });
 
   server.once('listening', () => {
     const actualPort = server.address().port;
@@ -511,12 +543,30 @@ if (isDirectRun) {
     console.log(`Slizm Gateway Web Admin running at http://${host}:${actualPort}/`);
   });
   let fallbackUsed = false;
-  server.on('error', (error) => {
-    if (error.code === 'EADDRINUSE' && configuredPort === undefined && !fallbackUsed) {
-      fallbackUsed = true;
-      console.warn(`默认管理端口 ${port} 被占用，改用系统分配的空闲端口。`);
-      server.listen(0, host);
-      return;
+  server.on('error', async (error) => {
+    if (error.code === 'EADDRINUSE' && port > 0 && !fallbackUsed) {
+      try {
+        const res = await fetch(`http://${host}:${port}/health`, {
+          signal: AbortSignal.timeout(1000),
+          redirect: 'error',
+        });
+        const info = await res.json();
+        if (
+          res.ok &&
+          info?.service === 'slizm-gateway-web' &&
+          Number.isSafeInteger(info.pid) &&
+          (!info.instanceKey || info.instanceKey === myInstanceKey)
+        ) {
+          console.log(`管理 Web 已在 http://${host}:${port}/ 运行中 (pid ${info.pid})，复用现有实例。`);
+          return;
+        }
+      } catch {}
+      if (configuredPort === undefined) {
+        fallbackUsed = true;
+        console.warn(`默认管理端口 ${port} 被占用，改用系统分配的空闲端口。`);
+        server.listen(0, host);
+        return;
+      }
     }
     console.error(`管理 Web 启动失败: ${error.message}`);
     process.exitCode = 1;

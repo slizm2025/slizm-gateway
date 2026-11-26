@@ -118,6 +118,7 @@
     metaBaseUrl: $("meta-baseurl"),
     btnOpenRestart: $("btn-open-restart"),
     authExpiredBanner: $("auth-expired-banner"),
+    btnReconnectSession: $("btn-reconnect-session"),
     overviewErrorBanner: $("overview-error-banner"),
     overviewErrorMsg: $("overview-error-msg"),
 
@@ -189,6 +190,10 @@
     mCache: $("m-cache"),
     mCacheHit: $("m-cache-hit"),
     mUnreported: $("m-unreported"),
+    mTpsCurrent: $("m-tps-current"),
+    mTpsPeak: $("m-tps-peak"),
+    mTpsAvg: $("m-tps-avg"),
+    mOutputTps: $("m-output-tps"),
     trendMetricToggle: $("trend-metric-toggle"),
     trendCanvas: $("trend-canvas"),
     trendEmpty: $("trend-empty"),
@@ -477,6 +482,29 @@
   }
 
   // --- API 客户端封装 ---
+  let reauthPromise = null;
+
+  async function refreshLocalSession() {
+    if (!reauthPromise) {
+      reauthPromise = (async () => {
+        try {
+          const res = await fetch("/api/session", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: "{}"
+          });
+          return Boolean(res?.ok);
+        } catch {
+          return false;
+        } finally {
+          reauthPromise = null;
+        }
+      })();
+    }
+    return reauthPromise;
+  }
+
   async function apiFetch(endpoint, options = {}) {
     const opts = {
       credentials: "same-origin",
@@ -487,10 +515,20 @@
       ...options
     };
 
-    const res = await fetch(endpoint, opts);
+    let res = await fetch(endpoint, opts);
+    if (res.status === 401) {
+      const recovered = await refreshLocalSession();
+      if (recovered) {
+        els.authExpiredBanner?.classList.add("hidden");
+        res = await fetch(endpoint, opts);
+      }
+    }
     if (res.status === 401) {
       markAuthRequired();
       throw new Error("401 Unauthorized");
+    }
+    if (res.ok) {
+      els.authExpiredBanner?.classList.add("hidden");
     }
     return res;
   }
@@ -553,29 +591,21 @@
   async function initAuth() {
     const hash = window.location.hash;
     const match = hash.match(/#token=([a-f0-9]+)/i);
-    if (match && match[1]) {
-      const token = match[1];
-      // 立即通过 replaceState 抹除 URL 中的 token
+    if (match) {
       try {
         window.history.replaceState(null, "", window.location.pathname + window.location.search);
       } catch {}
-
-      try {
-        const res = await fetch("/api/session", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: "Bearer " + token
-          },
-          body: "{}"
-        });
-        if (!res.ok) {
-          markAuthRequired();
-        }
-      } catch {
-        markAuthRequired();
-      }
+    }
+    try {
+      const res = await fetch("/api/session", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      if (!res.ok) markAuthRequired();
+    } catch {
+      markAuthRequired();
     }
   }
 
@@ -2009,6 +2039,12 @@
     setReading(els.mCache, `${formatTokens(t.cacheRead)} / ${formatTokens(t.cacheWrite)}`);
     els.mCacheHit.textContent = formatCacheHitRate(t);
     els.mUnreported.textContent = formatNumber(t.unreported);
+    const traffic = data.traffic?.tps;
+    els.mTpsCurrent.textContent = formatRate(traffic?.current);
+    els.mTpsPeak.textContent = formatRate(traffic?.peak);
+    els.mTpsAvg.textContent = formatRate(traffic?.avg);
+    els.mOutputTps.textContent = formatRate(t.avgOutputTokensPerSec);
+    els.mOutputTps.title = "有效样本: " + formatNumber(t.outputTpsSamples);
 
     // 交换台线路
     renderSwitchboard(data);
@@ -2118,12 +2154,24 @@
     });
   }
 
+  function formatRate(value) {
+    return Number.isFinite(value) && value >= 0 ? value.toFixed(2) + " tok/s" : "-";
+  }
+
+  function appendOutputRateCell(tr, value, samples) {
+    const td = document.createElement("td");
+    td.className = "num-font";
+    td.textContent = formatRate(value);
+    if (samples !== undefined) td.title = "有效样本: " + formatNumber(samples);
+    tr.appendChild(td);
+  }
+
   function renderProvidersTable(providers) {
     els.tableProvidersBody.innerHTML = "";
     if (providers.length === 0) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 9;
+      td.colSpan = 10;
       td.className = "text-center text-muted";
       td.textContent = "暂无数据";
       tr.appendChild(td);
@@ -2189,6 +2237,7 @@
       tdPriced.textContent = `${formatNumber(p.pricedRequests)} 已计 / ${formatNumber(p.unpricedRequests)} 未计`;
       tr.appendChild(tdPriced);
 
+      appendOutputRateCell(tr, p.avgOutputTokensPerSec, p.outputTpsSamples);
       els.tableProvidersBody.appendChild(tr);
     });
   }
@@ -2198,7 +2247,7 @@
     if (models.length === 0) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 8;
+      td.colSpan = 9;
       td.className = "text-center text-muted";
       td.textContent = "暂无数据";
       tr.appendChild(td);
@@ -2249,6 +2298,7 @@
       tdPriced.textContent = `${formatNumber(m.pricedRequests)} 已计 / ${formatNumber(m.unpricedRequests)} 未计`;
       tr.appendChild(tdPriced);
 
+      appendOutputRateCell(tr, m.avgOutputTokensPerSec, m.outputTpsSamples);
       els.tableModelsBody.appendChild(tr);
     });
   }
@@ -2258,7 +2308,7 @@
     if (recent.length === 0) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 9;
+      td.colSpan = 10;
       td.className = "text-center text-muted";
       td.textContent = "暂无历史记录";
       tr.appendChild(td);
@@ -2317,6 +2367,7 @@
       setCost(tdCost, item.costUsd, item.baseCostUsd, item.priceMultiplier, item, "recent:" + (item.requestId || item.time));
       tr.appendChild(tdCost);
 
+      appendOutputRateCell(tr, item.outputTokensPerSec);
       els.tableRecentBody.appendChild(tr);
     });
   }
@@ -3870,17 +3921,18 @@
         { label: "Gemini", value: "gemini" }
       ], p.apiType || "anthropic", (val) => {
         p.apiType = val;
-        if (val !== "openai") p.messagesTransport = "chat-completions";
+        if (val !== "openai") p.messagesTransport = "auto";
         fTransport.querySelector("select").disabled = val !== "openai";
-        fTransport.querySelector("select").value = p.messagesTransport || "chat-completions";
+        fTransport.querySelector("select").value = p.messagesTransport || "auto";
         refreshSummary();
       });
       row1.appendChild(fType);
 
       const fTransport = createSelectField("Messages 请求出口", [
-        { label: "Chat Completions（默认）", value: "chat-completions" },
-        { label: "Responses", value: "responses" }
-      ], p.messagesTransport || "chat-completions", (val) => { p.messagesTransport = val; });
+        { label: "自动（GPT 优先 Responses）", value: "auto" },
+        { label: "Responses", value: "responses" },
+        { label: "Chat Completions", value: "chat-completions" }
+      ], p.messagesTransport || "auto", (val) => { p.messagesTransport = val; });
       fTransport.querySelector("select").disabled = p.apiType !== "openai";
       row1.appendChild(fTransport);
 
@@ -4414,9 +4466,25 @@
       applyAutoRefresh(enabled);
       if (enabled) fetchOverview();
     });
-    // 切回页面时立即补一次刷新，不必等下一轮
+    // 切回页面或网络恢复时立即补一次刷新，不必等下一轮
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && state.autoRefresh && (state.activeView === "overview" || state.activeView === "usage")) fetchOverview();
+    });
+    window.addEventListener("online", () => {
+      if (!document.hidden && (state.activeView === "overview" || state.activeView === "usage")) fetchOverview();
+    });
+    els.btnReconnectSession?.addEventListener("click", async () => {
+      const ok = await refreshLocalSession();
+      if (!ok) {
+        showToast("无法连接到本地管理服务，请确认服务正在运行", "error");
+        return;
+      }
+      els.authExpiredBanner?.classList.add("hidden");
+      showToast("已重新连接本地管理服务", "success");
+      if (state.activeView === "logs") fetchLogs();
+      else if (state.activeView === "settings") fetchSettings();
+      else if (state.activeView === "subagents") window.Subagents?.load();
+      else fetchOverview();
     });
 
     // 趋势图指标切换 (Tokens / Cost)

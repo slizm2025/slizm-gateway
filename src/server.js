@@ -12,8 +12,8 @@ import * as gemini from './providers/gemini.js';
 import * as responses from './providers/responses.js';
 import * as messagesResponses from './providers/messages-to-responses.js';
 import { openAIToAnthropicStream, anthropicJsonToStream, convertJsonResponse, SSE_HEADERS } from './stream.js';
-import { withUpstream, gateStats, configureProviderLimits, networkErrorCode, isSafeToRetryNetworkError, isRetryableStatus } from './limiter.js';
-import { modelSeries, adaptBodyForModelSeries, adaptResponsesBodyForModelSeries } from './model-series.js';
+import { withUpstream, gateStats, configureProviderLimits, networkErrorCode, isSafeToRetryNetworkError, isRetryableStatus, formatErrorMessage } from './limiter.js';
+import { modelSeries, messagesTransportFor, adaptBodyForModelSeries, adaptResponsesBodyForModelSeries } from './model-series.js';
 import { createRequestProfile, forwardEndToEndHeaders } from './providers/client-headers.js';
 import { replaceResponseModel } from './providers/response-body.js';
 import { createSseDecoder } from './sse.js';
@@ -121,7 +121,9 @@ function log(requestId, message) {
 const CLIENT_BADGES = Object.freeze({
   codex: '◖⚆ᴥ⚆◗',
   'claude-code': '▗[•.•]▖',
-  'deepseek-harness': '~(·)><',
+  // DeepSeek Harness 与普通 DeepSeek 客户端分开显示：gw.js logs 按这个图标还原
+  // 客户端名称，两者共用一个图标会让 DSH 请求被读成 DeepSeek。
+  'deepseek-harness': '⬢[DSH]⬢',
   deepseek: '~(·)><',
   gemini: '▼(ᴥ)▼',
   unknown: '·?·',
@@ -171,7 +173,14 @@ function validBody(body) {
 function checkClientAuth(req) {
   const expected = Buffer.from(currentConfig().server.clientToken);
   const auth = req.headers.authorization ?? '';
-  const candidates = [auth.startsWith('Bearer ') ? auth.slice(7) : '', req.headers['x-api-key'] ?? ''];
+  // DeepSeek Harness 按自己的提供方选择凭据头：api-key 提供方发 x-api-key，
+  // 账户提供方发 x-dsh-auth-token。两者都是客户端凭据，任一匹配即通过；
+  // 转发上游前都会被换掉（见 providers/client-headers.js 的 DROP_HEADERS）。
+  const candidates = [
+    auth.startsWith('Bearer ') ? auth.slice(7) : '',
+    req.headers['x-api-key'] ?? '',
+    req.headers['x-dsh-auth-token'] ?? '',
+  ];
   return candidates.some((value) => { const b = Buffer.from(String(value)); return b.length === expected.length && timingSafeEqual(b, expected); });
 }
 function requestContext(res, timeoutMs) {
@@ -214,10 +223,17 @@ function createResponsesMonitor(contentType, onUsage) {
   let size = 0;
   const chunks = [];
   const state = { error: null, terminal: false };
+  let upstreamUsage = {};
   const inspect = (payload) => {
     const response = payload.response ?? payload;
-    if (response.usage) onUsage(openai.anthropicUsageFromOpenAI(response.usage));
-    if (payload.type === 'error' || payload.type === 'response.failed' || response.status === 'failed') state.error = 'Upstream Responses failure';
+    if (response.usage) {
+      upstreamUsage = openai.mergeOpenAIUsage(upstreamUsage, response.usage);
+      onUsage(openai.anthropicUsageFromOpenAI(upstreamUsage));
+    }
+    if (payload.type === 'error' || payload.type === 'response.failed' || response.status === 'failed') {
+      const error = payload.error ?? response.error ?? payload;
+      state.error = typeof error === 'string' ? error : JSON.stringify(error);
+    }
   };
   const decoder = contentType.includes('event-stream') ? createSseDecoder((data) => {
     if (data === '[DONE]') return;
@@ -319,7 +335,7 @@ async function handleMessages(req, res, body, requestId, rawBody) {
   if (provider.requireKey !== false && !provider.apiKey) return errorResponse(res, 503, `provider ${provider.name} 的密钥未配置，请填入密钥后重启网关`, 'authentication_error', { 'x-should-retry': 'false' });
   const upstreamModel = targetFor(route);
   const profile = createRequestProfile(provider, upstreamModel, route.clientProfile, req.headers);
-  const responsesTransport = provider.apiType === 'openai' && provider.messagesTransport === 'responses';
+  const responsesTransport = provider.apiType === 'openai' && messagesTransportFor(provider, upstreamModel) === 'responses';
   if (responsesTransport) {
     try { messagesResponses.buildResponsesBody(body, upstreamModel); }
     catch (error) { return errorResponse(res, 400, error.message, 'invalid_request_error'); }
@@ -369,27 +385,25 @@ async function handleMessages(req, res, body, requestId, rawBody) {
     });
     headersMs = Date.now() - t0;
     const upstream = acquired.res;
-    if (!upstream.ok && provider.apiType === 'anthropic') {
+    if (!upstream.ok) {
       const sample = createBodySample(64 * 1024);
       const headers = forwardEndToEndHeaders(upstream.headers);
       // Preserve the existing protection against replay after uncertain delivery.
       if (!isRetryableStatus(upstream.status) && upstream.status >= 500) headers['x-should-retry'] = 'false';
+      if (provider.apiType !== 'anthropic') {
+        const text = redact(await readResponseText(upstream, 4 * 1024 * 1024));
+        headers['content-length'] = String(Buffer.byteLength(text));
+        res.writeHead(upstream.status, headers);
+        res.end(text);
+        finish({ status: upstream.status, mark: '✗', label: `上游 ${upstream.status}`, error: text, extra: fmtBytes(Buffer.byteLength(text)), ttfb: false });
+        return;
+      }
       res.writeHead(upstream.status, headers);
       const bytes = upstream.body
         ? await relayBody(upstream.body, res, ctx.signal, sample.push)
         : (res.end(), 0);
       finish({ status: upstream.status, mark: '✗', label: `上游 ${upstream.status}`, error: summarizeError(sample.text(), 800), extra: fmtBytes(bytes), ttfb: false });
       return;
-    }
-    if (!upstream.ok) {
-      const rawText = await readResponseText(upstream, 64 * 1024, true);
-      const text = redact(rawText);
-      finish({ status: upstream.status, mark: '✗', label: `上游 ${upstream.status}`, error: text, ttfb: false });
-      const headers = {};
-      for (const key of ['retry-after', 'request-id', 'x-request-id']) { const value = upstream.headers.get(key); if (value) headers[key] = value; }
-      if (upstream.headers.get('x-should-retry') === 'false' || (!isRetryableStatus(upstream.status) && upstream.status >= 500)) headers['x-should-retry'] = 'false';
-      // HTML 错误页（如 Cloudflare 502）只转述标题，不把整页 HTML 塞给 Claude Code
-      return errorResponse(res, upstream.status, `上游 ${provider.name} 返回 ${upstream.status}: ${summarizeError(text, 800)}`, 'api_error', headers);
     }
     const contentType = upstream.headers.get('content-type') ?? 'application/json';
     if (provider.apiType === 'anthropic') {
@@ -446,10 +460,11 @@ async function handleMessages(req, res, body, requestId, rawBody) {
     const code = networkErrorCode(e);
     const deadlineExpired = ctx.signal.aborted && ctx.signal.reason?.name === 'TimeoutError';
     const failure = deadlineExpired ? ctx.signal.reason : e;
+    const failureMessage = formatErrorMessage(failure);
     const phase = e.upstreamPhase ?? (acquired ? 'response-body' : 'unknown');
     const elapsedMs = e.upstreamElapsedMs ?? (acquired && Number.isFinite(attemptStarted) ? Math.round(performance.now() - attemptStarted) : undefined);
     const transport = e.upstreamTransport ?? (acquired ? (provider.proxy ? 'proxy' : 'direct') : undefined);
-    const detail = `${failure.message}${code ? ` (${code})` : ''} [${phase}]${Number.isFinite(elapsedMs) ? ` ${elapsedMs}ms` : ''}${transport ? ` via ${transport}` : ''}`;
+    const detail = `${failureMessage}${code ? ` (${code})` : ''} [${phase}]${Number.isFinite(elapsedMs) ? ` ${elapsedMs}ms` : ''}${transport ? ` via ${transport}` : ''}`;
     const timeout = deadlineExpired || e.name === 'TimeoutError' || e.name === 'AbortError' || ['GATEWAY_CONNECT_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(code);
     finish({ status: timeout ? 504 : 502, mark: '✗', label: timeout ? '504 上游超时' : '502 网关转发失败', error: `${failure.name}: ${detail}` });
     const headers = { 'x-upstream-phase': phase };
@@ -473,7 +488,7 @@ async function handleResponses(req, res, body, requestId, rawBody) {
   if (provider.requireKey !== false && !provider.apiKey) return errorResponse(res, 503, `provider ${provider.name} 的密钥未配置，请填入密钥后重启网关`, 'authentication_error', { 'x-should-retry': 'false' });
   const upstreamModel = targetFor(route);
   const profile = createRequestProfile(provider, upstreamModel, route.clientProfile, req.headers);
-  const directResponses = provider.apiType === 'openai' && (profile.clientType === 'codex' || provider.messagesTransport === 'responses');
+  const directResponses = provider.apiType === 'openai' && (profile.clientType === 'codex' || messagesTransportFor(provider, upstreamModel) === 'responses');
   let internalBody;
   if (!directResponses) {
     try { internalBody = responses.responsesToAnthropic(body); } catch (e) { return errorResponse(res, 400, e.message, 'invalid_request_error'); }
@@ -520,6 +535,7 @@ async function handleResponses(req, res, body, requestId, rawBody) {
     const upstream = acquired.res;
     if (directResponses) {
       const monitor = createResponsesMonitor(upstream.headers.get('content-type') ?? '', (u) => recordStreamUsage(usage, u));
+      const errorSample = upstream.ok ? undefined : createBodySample(64 * 1024);
       res.writeHead(upstream.status, forwardEndToEndHeaders(upstream.headers));
       let bytes = 0;
       let terminalSent = false;
@@ -528,6 +544,7 @@ async function handleResponses(req, res, body, requestId, rawBody) {
           await relayBody(upstream.body, res, ctx.signal, (chunk) => {
             bytes += chunk.byteLength;
             monitor.push(chunk);
+            errorSample?.push(chunk);
             if (monitor.terminal && !res.destroyed) terminalSent = true;
           }, () => monitor.terminal);
         } else res.end();
@@ -544,19 +561,21 @@ async function handleResponses(req, res, body, requestId, rawBody) {
         status: upstream.status,
         mark: failed ? '✗' : '←',
         label: !upstream.ok ? `上游 ${upstream.status}` : monitor.error ? `${upstream.status} Responses failure` : String(upstream.status),
-        usageStatus: monitor.error ? 502 : upstream.status,
-        error: monitor.error ?? (!upstream.ok ? `Upstream HTTP ${upstream.status}` : undefined),
+        usageStatus: upstream.ok && monitor.error ? 502 : upstream.status,
+        error: !upstream.ok ? errorSample.text() || monitor.error : monitor.error ?? undefined,
         extra: fmtBytes(bytes),
       });
       return;
     }
     if (!upstream.ok) {
-      const text = redact(await readResponseText(upstream, 64 * 1024, true));
-      finish({ status: upstream.status, mark: '✗', label: `上游 ${upstream.status}`, error: text });
-      const headers = {};
-      for (const key of ['retry-after', 'request-id', 'x-request-id']) { const value = upstream.headers.get(key); if (value) headers[key] = value; }
+      const text = redact(await readResponseText(upstream, 4 * 1024 * 1024));
+      const headers = forwardEndToEndHeaders(upstream.headers);
       if (upstream.headers.get('x-should-retry') === 'false' || (!isRetryableStatus(upstream.status) && upstream.status >= 500)) headers['x-should-retry'] = 'false';
-      return errorResponse(res, upstream.status, `上游 ${provider.name} 返回 ${upstream.status}: ${summarizeError(text, 800)}`, 'api_error', headers);
+      headers['content-length'] = String(Buffer.byteLength(text));
+      res.writeHead(upstream.status, headers);
+      res.end(text);
+      finish({ status: upstream.status, mark: '✗', label: `上游 ${upstream.status}`, error: text, extra: fmtBytes(Buffer.byteLength(text)) });
+      return;
     }
     const contentType = upstream.headers.get('content-type') ?? 'application/json';
     if (body.stream) {
@@ -596,9 +615,10 @@ async function handleResponses(req, res, body, requestId, rawBody) {
     const code = networkErrorCode(e);
     const deadlineExpired = ctx.signal.aborted && ctx.signal.reason?.name === 'TimeoutError';
     const failure = deadlineExpired ? ctx.signal.reason : e;
+    const failureMessage = formatErrorMessage(failure);
     const timeout = deadlineExpired || e.name === 'TimeoutError' || e.name === 'AbortError' || ['GATEWAY_CONNECT_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(code);
-    finish({ status: timeout ? 504 : 502, mark: '✗', label: timeout ? '504 上游超时' : '502 网关转发失败', error: `${failure.name}: ${failure.message}` });
-    errorResponse(res, timeout ? 504 : 502, `${timeout ? '上游超时' : '网关转发失败'} (${provider.name}): ${failure.message}`, timeout ? 'timeout_error' : 'api_error', { 'x-should-retry': 'false' });
+    finish({ status: timeout ? 504 : 502, mark: '✗', label: timeout ? '504 上游超时' : '502 网关转发失败', error: `${failure.name}: ${failureMessage}` });
+    errorResponse(res, timeout ? 504 : 502, `${timeout ? '上游超时' : '网关转发失败'} (${provider.name}): ${failureMessage}`, timeout ? 'timeout_error' : 'api_error', { 'x-should-retry': 'false' });
   } finally {
     await acquired?.res.body?.cancel().catch(() => {});
     acquired?.release();

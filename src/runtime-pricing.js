@@ -50,7 +50,7 @@ function nonPricing(raw) {
     routes: Object.fromEntries(Object.entries(raw.routes ?? {}).map(([alias, target]) =>
       [alias, typeof target === 'string' ? { provider: target } : target])),
     providers: providers?.map(({ priceMultipliers, ...provider }) => ({
-      apiType: 'anthropic', clientProfile: 'auto', messagesTransport: 'chat-completions',
+      apiType: 'anthropic', clientProfile: 'auto', messagesTransport: 'auto',
       maxConcurrency: 3, maxAttempts: 4, connectTimeoutMs: 30000, requestTimeoutMs: 600000,
       requireKey: true, models: {}, ...provider,
     })),

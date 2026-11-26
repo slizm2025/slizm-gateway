@@ -172,7 +172,7 @@ test('server.js：每个请求的日志各占一行，内容准确', async (t) =
   });
   await t.test('流里的 error 事件、没有 message_stop 就结束，都不算成功', () => {
     assert.ok(find('✗ messages err-sse ▗[•.•]▖', '200 流内错误', 'overloaded_error: Overloaded'), out);
-    assert.ok(find('⚠ messages cut-sse ~(·)><', '200 流未收尾'), out);
+    assert.ok(find('⚠ messages cut-sse ⬢[DSH]⬢', '200 流未收尾'), out);
     assert.ok(find('✗ messages oai-broken ⇒ gpt-x ◖⚆ᴥ⚆◗', '200 流内错误'), out);
     assert.equal(usage.routes['ok-alias'].successes, 1);
     for (const route of ['err-sse', 'cut-sse', 'oai-broken']) assert.equal(usage.routes[route].errors, 1, route);
@@ -196,7 +196,7 @@ test('server.js：每个请求的日志各占一行，内容准确', async (t) =
     assert.ok(!lines.some((l) => / messages gemini-x ⇒ /.test(l)), '无映射时只显示单一模型\n' + out);
   });
   await t.test('每个客户端的请求日志带稳定 Unicode 图标标签', () => {
-    for (const badge of ['◖⚆ᴥ⚆◗', '▗[•.•]▖', '~(·)><', '·?·']) {
+    for (const badge of ['◖⚆ᴥ⚆◗', '▗[•.•]▖', '⬢[DSH]⬢', '~(·)><', '·?·']) {
       assert.ok(out.includes(`→ messages gemini-x ${badge}`), `${badge}\n${out}`);
       assert.ok(out.includes(`← messages gemini-x ${badge}`), `${badge}\n${out}`);
     }

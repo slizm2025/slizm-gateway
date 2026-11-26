@@ -9,6 +9,7 @@ import { mkdtemp, writeFile, readFile, cp, mkdir, rm, readdir } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadConfig } from '../src/config.js';
 import { upstreamFetch, readResponseText } from '../src/upstream-fetch.js';
 import { openAIToAnthropicStream } from '../src/stream.js';
 import { buildHeaders } from '../src/providers/anthropic.js';
@@ -94,17 +95,82 @@ test('Gemini URLs, series adaptation and SSE aggregation remain compatible', asy
     ['You are Codex, a coding agent based on GPT-5. You share a workspace.', 'You are an AI coding agent. You share a workspace.'],
     ['You are ChatGPT, built on GPT-5.1-codex.\nNext line.', 'You are an AI coding agent.\nNext line.'],
     ['You are clumsy in the git console. Codex is fine.', 'You are clumsy in the git console. Codex is fine.'],
+    ['You are an AI agent powered by DeepSeek Harness.', 'You are an AI coding agent.'],
+    ['You are a coding agent powered by the deepseek-v4.1-flash model.', 'You are an AI coding agent.'],
+    ['You are DeepSeek, an AI assistant.', 'You are an AI coding agent.'],
+    [
+      'The DeepSeek Harness implementation checkout is at D:\\project\\dsh\\deepseek-harness. Use pwd to determine cwd.',
+      'The Agent Harness implementation checkout is at D:\\project\\dsh\\deepseek-harness. Use pwd to determine cwd.',
+    ],
+    [
+      'You are interacting with the user through the DeepSeek Harness Web GUI at http://127.0.0.1:3000. When the user refers to "this page", they mean this GUI. The browser provides no implicit DOM, route, or screenshot context.',
+      'You are interacting with the user through the Agent Harness Web GUI at http://127.0.0.1:3000. When the user refers to "this page", they mean this GUI. No browser DOM, route, or screenshot state is attached automatically.',
+    ],
+    ['You are an AI agent powered by DeepSeek Harness', 'You are an AI agent powered by Agent Harness'],
   ]) assert.equal(adaptBodyForModelSeries({ system: input }, 'gemini-test').system, expected);
+  const dshBlocks = {
+    system: [
+      { type: 'text', text: 'You are an AI agent powered by DeepSeek Harness.', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'The DeepSeek Harness implementation checkout is at /repo/deepseek-harness.' },
+    ],
+    messages: [
+      { role: 'system', content: [{ type: 'text', text: 'You are interacting with the user through the DeepSeek Harness Web GUI at http://127.0.0.1:3000.' }] },
+      { role: 'user', content: 'You are an AI agent powered by DeepSeek Harness.' },
+    ],
+  };
+  const dshGemini = adaptBodyForModelSeries(dshBlocks, 'gemini-4-hydrogen-high');
+  assert.deepEqual(dshGemini.system, [
+    { type: 'text', text: 'You are an AI coding agent.', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'The Agent Harness implementation checkout is at /repo/deepseek-harness.' },
+  ]);
+  assert.equal(dshGemini.messages[0].content[0].text, 'You are interacting with the user through the Agent Harness Web GUI at http://127.0.0.1:3000.');
+  assert.equal(dshGemini.messages[1].content, 'You are an AI agent powered by DeepSeek Harness.');
+  assert.equal(adaptBodyForModelSeries(dshBlocks, 'deepseek-v4.1-flash-1017'), dshBlocks, '非 Gemini 系列不改写 DeepSeek Harness 提示词');
   const codexBody = { instructions: 'You are Codex, based on GPT-5.', input: [{ role: 'developer', content: [{ type: 'input_text', text: 'You are Codex.' }] }, { role: 'user', content: 'You are Codex.' }] };
   const codexOut = adaptResponsesBodyForModelSeries(codexBody, 'gemini-test');
   assert.equal(codexOut.instructions, 'You are an AI coding agent.');
   assert.equal(codexOut.input[0].content[0].text, 'You are an AI coding agent.');
   assert.equal(codexOut.input[1].content, 'You are Codex.');
+  const dshResp = adaptResponsesBodyForModelSeries({
+    instructions: 'You are an AI agent powered by DeepSeek Harness.\n\nYou are interacting with the user through the DeepSeek Harness Web GUI at http://127.0.0.1:3000.',
+    input: [
+      { role: 'developer', content: [{ type: 'input_text', text: 'The DeepSeek Harness implementation checkout is at /repo/deepseek-harness.' }] },
+      { role: 'user', content: 'DeepSeek Harness' },
+    ],
+  }, 'vertex.gemini-2.5-pro');
+  assert.equal(dshResp.instructions, 'You are an AI coding agent.\n\nYou are interacting with the user through the Agent Harness Web GUI at http://127.0.0.1:3000.');
+  assert.equal(dshResp.input[0].content[0].text, 'The Agent Harness implementation checkout is at /repo/deepseek-harness.');
+  assert.equal(dshResp.input[1].content, 'DeepSeek Harness');
   assert.equal(adaptResponsesBodyForModelSeries(codexBody, 'gpt-6-sol'), codexBody, '其他系列原样返回');
   const plain = { instructions: 'Be concise.', input: 'hi' };
   assert.equal(adaptResponsesBodyForModelSeries(plain, 'gemini-test'), plain, '没有身份句时返回同一个对象');
   const response = new Response('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
   assert.equal((await geminiCompletion(response)).choices[0].message.content, 'ok');
+});
+
+test('messagesTransport defaults to auto, keeps explicit values and gates responses to openai', () => {
+  const load = (overrides = {}) => loadConfig({
+    raw: { providers: [{ name: 'p', baseUrl: 'https://example.invalid/v1', apiKey: 'fixture-key', ...overrides }], routes: {} },
+  }).providers.get('p');
+
+  // 默认 auto：无论 apiType 都解析为 auto
+  assert.equal(load().messagesTransport, 'auto');
+  assert.equal(load({ apiType: 'anthropic' }).messagesTransport, 'auto');
+  assert.equal(load({ apiType: 'openai' }).messagesTransport, 'auto');
+  assert.equal(load({ apiType: 'gemini' }).messagesTransport, 'auto');
+
+  // 显式 chat-completions 原样保留
+  assert.equal(load({ messagesTransport: 'chat-completions' }).messagesTransport, 'chat-completions');
+  assert.equal(load({ apiType: 'openai', messagesTransport: 'chat-completions' }).messagesTransport, 'chat-completions');
+
+  // openai 允许 responses；非 openai 只禁止 responses，auto 合法
+  assert.equal(load({ apiType: 'openai', messagesTransport: 'responses' }).messagesTransport, 'responses');
+  assert.throws(() => load({ messagesTransport: 'responses' }), /openai/);
+  assert.throws(() => load({ apiType: 'anthropic', messagesTransport: 'responses' }), /openai/);
+  assert.throws(() => load({ apiType: 'gemini', messagesTransport: 'responses' }), /openai/);
+
+  // 三值之外一律拒绝
+  assert.throws(() => load({ messagesTransport: 'bogus' }), /messagesTransport/);
 });
 
 test('isolated configuration and management commands', async (t) => {

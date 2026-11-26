@@ -22,7 +22,11 @@
     if (!model && data?.defaults.model) return "全局默认 " + data.defaults.model + " · " + modelInfo(data.defaults.model);
     const route = data?.models.find((m) => m.id === model);
     if (!route) return model ? "客户端模型策略" : "全局默认 / 主会话";
-    return route.provider + " · " + route.targetModel + (route.status === "ok" ? " · 检测通过" : " · " + (route.reason || "尚未检测"));
+    const status = !route.available ? route.reason || "配置不可用"
+      : route.status === "ok" ? "检测通过"
+      : route.status === "failed" ? "检测失败（" + (route.checkReason || "连接异常") + "）"
+      : "未检测";
+    return route.provider + " · " + route.targetModel + " · " + status;
   }
   function options(select, values, value) {
     select.replaceChildren();
@@ -44,7 +48,7 @@
     if (tool === "claude" && allowInherit) values.push({ value: "inherit", label: "跟随主会话 (inherit)" });
     for (const route of data.models) {
       if (route.id === "inherit") continue;
-      values.push({ value: route.id, label: route.id + " · " + route.provider + (route.available ? "" : " (" + (route.reason || "尚未检测") + ")"), disabled: !route.available });
+      values.push({ value: route.id, label: route.id + " · " + route.provider + (!route.available ? " (" + (route.reason || "配置不可用") + ")" : route.status === "failed" ? " (检测失败)" : ""), disabled: !route.available });
     }
     options(select, values, value);
   }
@@ -254,7 +258,7 @@
       try {
         const result = await request("/api/subagents/" + tool + "/check-models", "POST", {});
         busy = false; accept(result, selected?.name);
-        toast("检测完成：" + result.models.filter(m => m.available).length + " 条可用线路", "info");
+        toast("检测完成：" + result.models.filter(m => m.status === "ok").length + " 条线路通过检测", "info");
       } catch (error) { toast(error.message, "error"); }
       finally { busy = false; updateStatus(); }
     }));

@@ -87,9 +87,9 @@ export function createSubagentModels({ configPath, cachePath, fetchImpl = fetch,
     return models.map((model) => {
       const cached = results.get(signature + ':' + model.id);
       const result = cached && Date.now() - Date.parse(cached.checkedAt) < cacheTtlMs ? cached : null;
-      return { ...model, status: 'unchecked', ...result,
-        available: model.available && result?.status === 'ok',
-        ...(model.reason ? { reason: model.reason } : !result ? { reason: '尚未检测' } : {}),
+      return { ...model, status: result?.status ?? 'unchecked',
+        ...(result ? { checkedAt: result.checkedAt } : {}),
+        ...(result?.reason ? { checkReason: result.reason } : {}),
       };
     });
   }

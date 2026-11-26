@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildOpenAIHeaders, buildResponsesHeaders } from '../src/providers/openai.js';
 import { buildHeaders } from '../src/providers/anthropic.js';
+import { detectClient, createRequestProfile } from '../src/providers/client-headers.js';
 
 const provider = {
   name: 'fixture',
@@ -31,12 +32,19 @@ const codexHeaders = {
   accept: 'text/event-stream',
 };
 
+// 真实 DeepSeek Harness 客户端（@deepseek-ai/dsh-llm 0.2.0-rc.2 +
+// dsh-llm-deepseek 0.2.0-rc.2）的 Messages 请求头：
+// attribution 的 User-Agent、每个请求都带的 x-deepseek-harness-user-id，
+// 加上可由 api-key 或账户提供方提供的客户端凭据。
 const deepSeekHarnessHeaders = {
-  'user-agent': 'deepseek-harness/1.0.0',
-  'x-client-name': 'deepseek-harness',
-  'x-client-version': '1.0.0',
-  accept: 'application/json',
-  'x-request-id': 'deepseek-request',
+  'user-agent': 'deepseek-harness/0.2.0-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)',
+  'content-type': 'application/json',
+  accept: 'text/event-stream',
+  'anthropic-version': '2023-06-01',
+  'anthropic-beta': 'mid-conversation-tool-changes-2026-07-01',
+  'x-deepseek-harness-user-id': 'anonymous-user-fixture',
+  'x-deepseek-harness-session-id': 'session-fixture',
+  'x-api-key': 'harness-client-token',
 };
 
 test('Claude Code -> GPT keeps the existing Codex fingerprint behavior', () => {
@@ -52,6 +60,26 @@ test('Claude Code -> GPT keeps the existing Codex fingerprint behavior', () => {
   assert.equal(headers.authorization, 'Bearer upstream-secret');
 });
 
+test('Claude Code session affinity is stable, scoped and separate from request IDs', () => {
+  const profile = (p = provider, model = 'gpt-test', incoming = claudeCodeHeaders) => createRequestProfile(p, model, undefined, incoming);
+  const first = profile();
+  const next = profile();
+  assert.equal(first.codexContext.sessionId, next.codexContext.sessionId);
+  assert.notEqual(first.codexContext.sessionId, claudeCodeHeaders['x-claude-code-session-id']);
+  assert.notEqual(first.codexContext.turnId, next.codexContext.turnId);
+  assert.equal(buildOpenAIHeaders(provider, claudeCodeHeaders, first)['x-client-request-id'], first.codexContext.turnId);
+  assert.equal(buildOpenAIHeaders(provider, claudeCodeHeaders, first)['session-id'], first.codexContext.sessionId);
+  for (const changed of [
+    profile({ ...provider, name: 'other' }),
+    profile(provider, 'gpt-other'),
+    profile(provider, 'gpt-test', { ...claudeCodeHeaders, authorization: 'Bearer other' }),
+    profile(provider, 'gpt-test', { ...claudeCodeHeaders, 'x-claude-code-session-id': 'other-session' }),
+  ]) assert.notEqual(first.codexContext.sessionId, changed.codexContext.sessionId);
+  const absent = { ...claudeCodeHeaders };
+  delete absent['x-claude-code-session-id'];
+  assert.notEqual(profile(provider, 'gpt-test', absent).codexContext.sessionId, profile(provider, 'gpt-test', absent).codexContext.sessionId);
+});
+
 test('a non-Claude client can target GPT without being forced into Codex', () => {
   const headers = buildOpenAIHeaders(
     provider,
@@ -60,7 +88,7 @@ test('a non-Claude client can target GPT without being forced into Codex', () =>
   );
 
   assert.equal(headers['user-agent'], deepSeekHarnessHeaders['user-agent']);
-  assert.equal(headers['x-client-name'], deepSeekHarnessHeaders['x-client-name']);
+  assert.equal(headers['x-deepseek-harness-user-id'], deepSeekHarnessHeaders['x-deepseek-harness-user-id']);
   assert.equal(headers.originator, undefined);
   assert.equal(headers['x-codex-installation-id'], undefined);
   assert.equal(headers.authorization, 'Bearer upstream-secret');
@@ -94,7 +122,12 @@ test('ordinary pass-through providers preserve the original client fingerprint',
 test('Codex and DeepSeek Harness fingerprints remain distinguishable through pass-through', () => {
   const cases = [
     ['Codex', codexHeaders, { originator: 'Codex Desktop', 'x-codex-installation-id': 'codex-installation' }],
-    ['DeepSeek Harness', deepSeekHarnessHeaders, { 'x-client-name': 'deepseek-harness', 'x-client-version': '1.0.0' }],
+    ['DeepSeek Harness', deepSeekHarnessHeaders, {
+      'user-agent': deepSeekHarnessHeaders['user-agent'],
+      'x-deepseek-harness-user-id': 'anonymous-user-fixture',
+      'x-deepseek-harness-session-id': 'session-fixture',
+      'anthropic-beta': 'mid-conversation-tool-changes-2026-07-01',
+    }],
   ];
 
   for (const [name, incoming, markers] of cases) {
@@ -108,6 +141,7 @@ test('Codex and DeepSeek Harness fingerprints remain distinguishable through pas
       assert.equal(headers[header], value, `${name} marker ${header} should remain observable`);
     }
     for (const [header, value] of Object.entries(incoming)) {
+      if (header === 'x-api-key') continue; // 客户端凭据换成上游 key，不参与指纹
       assert.equal(headers[header], value, `${name} header ${header} should pass through unchanged`);
     }
   }
@@ -213,3 +247,59 @@ test('buildOpenAIHeaders existing logic and extraHeaders behavior remain intact'
   assert.equal(headers['x-custom-extra'], 'custom-value');
   assert.equal(headers.authorization, 'Bearer key-123');
 });
+
+// 识别矩阵：依据真实客户端实际发出的头，而不是猜想的字段。
+test('detectClient identifies the shipped DeepSeek Harness fingerprint', () => {
+  assert.equal(detectClient(deepSeekHarnessHeaders), 'deepseek-harness');
+  // 账户登录的 DSH 客户端只带 x-dsh-auth-token，没有 x-api-key。
+  const accountAuth = { ...deepSeekHarnessHeaders };
+  delete accountAuth['x-api-key'];
+  accountAuth['x-dsh-auth-token'] = 'account-token';
+  assert.equal(detectClient(accountAuth), 'deepseek-harness');
+  // User-Agent 允许白标改写：只有 x-deepseek-harness-* 头时仍必须识别为 DSH。
+  assert.equal(
+    detectClient({ ...deepSeekHarnessHeaders, 'user-agent': 'white-label-agent/1.2.3' }),
+    'deepseek-harness',
+  );
+  // 只有 UA 的路径（llm-pi-ai 适配器不发 x-deepseek-harness-*）。
+  assert.equal(detectClient({ 'user-agent': 'deepseek-harness/0.2.0-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)' }), 'deepseek-harness');
+  // 历史日志里的空格写法。
+  assert.equal(detectClient({ 'user-agent': 'DeepSeek Harness/1.0' }), 'deepseek-harness');
+});
+
+test('detectClient does not let Harness markers fall into other agents', () => {
+  // DSH 同时带 Anthropic 风格的头，也不能被 CLI 启发式抢走。
+  assert.equal(
+    detectClient({ ...deepSeekHarnessHeaders, 'x-app': 'cli', 'x-stainless-package-version': '0.68.0' }),
+    'deepseek-harness',
+  );
+  assert.equal(detectClient(claudeCodeHeaders), 'claude-code');
+  assert.equal(detectClient(codexHeaders), 'codex');
+  assert.equal(detectClient({ 'user-agent': 'DeepSeek/1.0' }), 'deepseek');
+  assert.equal(detectClient({ 'x-deepseek-request-id': 'plain' }), 'deepseek');
+  assert.equal(detectClient({ 'user-agent': 'ExampleClient/1.0' }), 'unknown');
+  // 未经验证的 x-harness-* 前缀不再算作 DSH。
+  assert.equal(detectClient({ 'x-harness-trace': 'other-tool' }), 'unknown');
+});
+
+test('the DSH account credential never reaches an upstream', () => {
+  const incoming = {
+    ...deepSeekHarnessHeaders,
+    'x-dsh-auth-token': 'account-token',
+    authorization: 'Bearer gateway-client-token',
+  };
+  for (const build of [
+    () => buildHeaders({ ...provider, apiType: 'anthropic' }, incoming),
+    () => buildOpenAIHeaders(provider, incoming, { targetModel: 'gpt-6-sol' }),
+    () => buildResponsesHeaders(provider, incoming),
+  ]) {
+    const headers = build();
+    assert.equal(headers['x-dsh-auth-token'], undefined);
+    assert.equal(headers['x-api-key'], undefined);
+  }
+  // DSH 自己的请求头（含会话标识）仍按原样透传。
+  const forwarded = buildHeaders({ ...provider, apiType: 'anthropic' }, incoming);
+  assert.equal(forwarded['x-deepseek-harness-session-id'], 'session-fixture');
+  assert.equal(forwarded.authorization, 'Bearer upstream-secret');
+});
+

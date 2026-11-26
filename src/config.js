@@ -101,7 +101,7 @@ export function loadConfig(opts = {}) {
     for (const [k, v] of Object.entries(extraHeaders)) if (/authorization|api[-_]key|token|secret/i.test(k)) remember(String(v));
     const proxy = resolveSecret(p.proxy, { label: `${p.name}.proxy` });
     if (p.allowInsecureTls === true) throw new Error(`${p.name}: 不支持关闭 TLS 校验，请使用受信任证书或 NODE_EXTRA_CA_CERTS`);
-    const messagesTransport = enumValue(p.messagesTransport, 'chat-completions', ['chat-completions', 'responses'], p.name + '.messagesTransport');
+    const messagesTransport = enumValue(p.messagesTransport, 'auto', ['auto', 'chat-completions', 'responses'], p.name + '.messagesTransport');
     if (p.apiType !== 'openai' && messagesTransport === 'responses') throw new Error(p.name + ': messagesTransport responses requires apiType openai');
     providers.set(p.name, {
       messagesTransport,

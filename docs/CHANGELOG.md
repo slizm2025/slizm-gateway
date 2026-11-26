@@ -4,6 +4,113 @@
 
 ---
 
+## 2026-11-08
+
+### 启动后只保留一个应用窗口，不再常驻命令行黑框
+
+**现象**：双击 `start.cmd` 后，除了管理页和控制面板，桌面上还长期留着一个标题为 `powershell.exe` 的 Windows Terminal 黑框。关掉它不影响服务，但每次启动都会再出现一个；管理页本身则是浏览器里多出来的一个标签页。
+
+**根因**：
+- `start.cmd` 用 `start "" powershell.exe … -WindowStyle Hidden -File scripts\control-panel.ps1 -AutoStart` 拉起 WinForms 面板。Windows 11 的默认终端是 Windows Terminal：控制台进程先交给 `OpenConsole.exe`，再由 `WindowsTerminal.exe` 显示成窗口，`-WindowStyle Hidden` 只对传统 conhost 生效，所以 WT 窗口一直留在桌面上，直到面板进程退出——而面板是常驻的。
+- 证据：进程树里 `powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File …\scripts\control-panel.ps1 -AutoStart`（pid 28804）伴随 `conhost.exe`（pid 9120），默认终端交接出 `WindowsTerminal.exe`（pid 41444）的 `powershell.exe` 窗口；`EnumWindows` 枚举到的可见顶层窗口同时含「Slizm Gateway 控制台」和这个黑框。结束面板进程后，conhost / OpenConsole / WT 三个进程一起消失、窗口随之关闭，说明黑框就是面板的控制台宿主。
+- 管理页用 `rundll32 url.dll,FileProtocolHandler` 打开，只能是默认浏览器里的一个标签页，做不成「一个应用页面」。
+
+**改动**：
+- 新增 `start.vbs`（纯 ASCII，由 wscript 托管，不产生控制台宿主进程）：解析 node（PATH → `%ProgramFiles%\nodejs` → `%ProgramFiles(x86)%\nodejs` → `%LOCALAPPDATA%\Programs\nodejs` → nvm-windows），把工作目录切到项目根，用隐藏窗口执行 `gw.js up`，stdout/stderr 覆盖写入 `logs/launcher.log`；退出码非 0 时弹窗给出英文提示和 UTF-8 日志尾部（`ADODB.Stream` 读取），不再静默失败。
+- `start.cmd` 改为薄壳：`start "" wscript.exe //Nologo "%~dp0start.vbs"` 后立即 `exit /b 0`，不再拉起 PowerShell 与 WinForms 面板。
+- `src/admin/lifecycle.js`：新增导出 `resolveAppBrowser()`，在 Windows 上按 Chrome → Edge 顺序查找浏览器，以 `--app=<管理页地址> --no-first-run --no-default-browser-check` 打开；`openBrowser()` 先走应用窗口，spawn 失败或设置 `GATEWAY_WEB_BROWSER=default` 时退回原来的默认浏览器方式。管理页因此是一个没有地址栏和标签栏的独立窗口，启动完成后桌面上只多出它。
+- `scripts/control-panel.ps1` 与 `npm run panel` / `panel:start` 保留为可选控制面板，不再参与启动流程；README 相应改写启动入口说明。
+- 重写 `scripts/test-launcher.mjs`：保留控制台编码、动词拼接、命令表和 `Complete-Command` 断言；新增 `start.cmd` 只转交 wscript、`start.vbs` 纯 ASCII 且以隐藏窗口等待 `gw.js up`、`logs/launcher.log`、`resolveAppBrowser` 的选择顺序与禁用场景；再用桩 `scripts/gw.js` 真跑一次 `start.vbs`（断言 argv、工作目录与日志），不复制 node_modules 也不占用真实端口。
+
+**验证**：
+- 本机（Windows 11，默认终端 Windows Terminal）双击 `start.vbs`：wscript 1.1 秒退出（退出码 0），`EnumWindows` 前后对比仅新增一个可见窗口「Slizm Gateway 控制台」，标题没有 ` - Google Chrome` 后缀（应用模式特征），`WindowsTerminal.exe` / `OpenConsole.exe` 一个都没有；`logs/launcher.log` 以 `✓ 一键启动完成 · Web http://127.0.0.1:48731/` 收尾。截图见 `screenshots/start-vbs-app-window.png`。
+- `npm run test:launcher` 9 项通过，`npm run test:lifecycle` 3 项通过，`npm test` 退出码 0。首次整跑时 `test-anthropic-compat.mjs` 触发过一次 Windows libuv 断言崩溃（`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 76`），该文件单跑 3 次和整套重跑均通过，与本次改动无关。
+
+---
+
+## 2026-10-31
+
+### 网关停用后 `start.cmd` 起不来
+
+**现象**：网关完全停止（没有 `logs/gateway.pid`、4100 端口未监听）时双击 `start.cmd`，控制窗口会弹出「操作失败：启动失败，进程 … 没能就绪」，端口始终没起来。网关已在运行时反而一切正常，因为 `-AutoStart` 看到服务齐全就不再执行启动命令，这条路径从未被走到。
+
+**根因**：
+- `scripts/control-panel.ps1` 的 `Start-GatewayCommand` 拼参数时写成 `$allArguments = @($script:GwScript) + $Arguments`，把 `$Kind`（命令动词）漏了，实际执行的是 `node scripts/gw.js --no-open`。证据：隔离副本启动后 `%TEMP%\slizm-gateway-panel-<pid>.out.log` 首行是 `未知命令: --no-open`，后面跟着 gw.js 帮助文本，端口未监听。
+- 即使命令成功也会显示失败：Windows PowerShell 5.1 下 `Start-Process -RedirectStandardOutput … -RedirectStandardError … -PassThru`（不带 `-Wait`）拿不到退出码，`HasExited=True` 时 `.ExitCode` 仍是 `$null`（失败的 `node -e "process.exit(3)"` 同样是 `$null`），`Complete-Command` 里 `$exitCode -eq 0` 永远不成立。
+- 修这个脚本时行内编辑丢掉了 UTF-8 BOM，PowerShell 5.1 会按 ANSI（CP936）解析无 BOM 的 `.ps1`，中文串变乱码并连带 6 个语法错误；已补回 BOM 并统一为 CRLF。
+
+**改动**：
+- `scripts/control-panel.ps1`：命令行改为 `@($script:GwScript, $Kind) + $Arguments`，动词回到 gw.js 前面；新增 `Test-CommandOutcome`，成功与否以 `status --json` 回读的真实服务状态判定（`down` 要求网关与 Web 都已停、`open` 要求 Web 在跑、其余要求网关就绪且 Web 就绪或已禁用），`Complete-Command` 不再依赖退出码；补上被引用却未定义的 `$script:L.Port`。
+- 新增 `scripts/test-launcher.mjs`，并入 `npm test`，也可单独 `npm run test:launcher`：检查 `start.cmd` 的隐藏启动与 `-AutoStart`、控制台的 BOM/CRLF 与动词拼接、按钮动词都在 gw.js 命令表里、`Complete-Command` 不读 `ExitCode`；再用 PowerShell AST 取出那条拼接语句，在真实解释器里求值，断言生成 `gw.js up --no-open` 这类命令行。
+
+**验证**：隔离副本（端口 4188、`GATEWAY_WEB_ENABLED=0`，用与 `start.cmd` 相同的命令行启动）修复前日志为 `未知命令: --no-open`、端口未监听；修复后消息依次为「正在处理，请稍候」「服务已启动」，4188 正常监听、写入 `logs/gateway.pid`、`/health` 返回全部路由。把 `$Kind` 从拼接里去掉再跑新测试，动词拼接与动态命令行两条失败、其余 4 条通过；恢复后 `npm test` 退出码 0。
+
+---
+
+## 2026-10-25
+
+### Windows 一键控制台与统一服务生命周期
+
+**现象**：启动和查看状态需要反复使用 `gw.js` 命令；现有 `start.cmd` 会保留命令行窗口，停止与重启也没有一个同时覆盖网关和管理 Web 的日常入口。
+
+**改动**：
+- 新增 `scripts/control-panel.ps1`：Windows 原生 WinForms 小窗口，显示网关/Web 的 PID、地址、在途请求、运行时间和源码更新提示，并提供启动、停止、重启、打开 Web、打开日志目录和刷新按钮。
+- `start.cmd` 改为隐藏启动控制窗口并自动确保缺失服务就绪，不再需要命令行窗口。
+- `gw.js` 新增 `up`、`down`、`open`、`status --json` 和 `restart --all`；`restart` 仍只重启网关，避免管理页重启自身。
+- 管理 Web 生命周期增加可查询状态，并清理已经退出进程留下的过期会话文件。
+- 新增 `scripts/test-gw-lifecycle.mjs`，使用隔离端口和临时目录验证双服务启动、幂等、重启、停止及 Web 禁用场景。
+- 修正控制窗口把 CLI 帮助文本和 ANSI 颜色码当成错误摘要显示的问题；错误现在会清理控制码并压缩为一行，详细内容保留在悬浮提示中。源码更新时高亮重启按钮，有在途请求时禁用停止和重启，底部状态栏显示更明确的服务组合与请求状态。
+
+**验证**：`npm run test:lifecycle` 3 项通过，包含重定向 CLI 输出不泄漏 ANSI 控制码；Windows PowerShell 5.1 下控制窗口可创建并保持响应，`start.cmd` 能隐藏启动窗口并创建控制台进程。
+
+---
+
+## 2026-10-07
+
+### DSH 响应契约与 Responses 转换补强
+
+**现象**：上一轮把 DSH 的识别与凭据理清后，继续按 DSH 客户端实际的解析口径核对「网关产出的东西 DSH 能不能吃下去」，发现两类可用性缺口：上游给出**没有内容块的正常完成**时，网关转换出的 Anthropic 流会被 DSH 判成失败；以及 `messagesTransport: "responses"` 的 provider 会**直接 400 掉每一条 DSH 请求**。
+
+**根因（附证据）**：判据是 DSH 实际在跑的客户端代码，不是文档推测。
+- 已安装的 `@deepseek-ai/dsh-llm-deepseek` 0.2.0-rc.2 用 `translate()` 校验响应：`message_stop` 时若「零内容块且 stop_reason 为 end_turn」，直接抛 `DeepSeek Messages returned no content`（`EMPTY_RESPONSE`）；`parseSse()` 还要求 `event:` 名等于 `data.type`（已核对 asar 内确实包含这些判定字符串）。Anthropic 协议本身保证至少一个内容块，而网关的 `openAIToAnthropicStream` 在上游只回 `finish_reason`、没有任何正文时会产出零块流。
+- `src/providers/messages-to-responses.js` 的 `buildResponsesBody` 有三条会命中 DSH 请求形状的拒绝：顶层 `thinking.type !== 'disabled'`（DSH 的 `WireRequest` **必带** `thinking`）、助手历史里的带签名 `thinking` 块、system 角色的 `tool_addition` / `tool_removal` 控制块。任一条都会让整条请求 400，所以该 provider 上的 DSH 会话无法工作。
+- 同时核对了路由与流的两处「疑似缺口」，结论是不需要改：`openAIChunks` 已保证至少出现一个选择块，因此 `message_start` 必然先于内容事件；只有 usage、没有任何 choice 的流会按既有约定转成显式 `error` 事件（DSH 的 `parseSse` 遇到它会抛 `providerError`，不会把半截流转成成功）。
+
+**改动**：
+- `src/stream.js`：转换流收尾前若从未打开过内容块，补一个空文本块（`content_block_start` + `content_block_stop`），与 Anthropic「至少一个内容块」的约定和 DSH 的 `EMPTY_RESPONSE` 判定对齐。
+- `src/providers/messages-to-responses.js`：接受并忽略顶层 `thinking`（不擅自补 `reasoning.effort`，避免不支持推理的上游 400）；跳过助手历史里的 `thinking` 块；system 消息只跳过 `tool_addition` / `tool_removal` 控制块、保留其中的文本；工具结果里的内联图片按聊天补全适配器的口径降级为文字标记，而不是让整条请求失败。其它未知块、未知图片源、`stop_sequences` 仍然照旧拒绝。
+
+**验证**：
+- `scripts/test-dsh-agent.mjs` 新增一个按 DSH `parseSse`/`translate` 规则写的流契约校验器（event 名与 `data.type` 一致、`message_start` 唯一且最先、块索引合法不重复、delta 只属于已打开的块、`message_stop` 前块已关闭且有 stop_reason、`end_turn` 不能零块），并用它校验三条实际转换路径：逐字节透传、JSON 应答转 SSE、空完成补块；另加一条断言确认「没有 choice 的流」保持为单个 `error` 事件。
+- `scripts/test-messages-to-responses.mjs` 新增 DSH 请求形状用例（顶层 thinking、system 控制块、带签名思考历史、工具结果内联图片），并补充既有拒绝用例（未知图片源、工具结果里的未知块仍需报错）。
+- `npm test` 退出码 0（node:test 24x/24x 全绿）。
+
+**未做**：网关仍没有 `/v1/chat/completions` 入口，`llm-pi-ai` 的 `api: openai-completions` 提供方指过来会 404；DSH 可改用 `api: anthropic-messages` 或 `openai-responses`（见 README 的入口对照表）。补这个入口需要新增「OpenAI Chat ⇄ Anthropic Messages」双向转换与流桥接，属于独立功能，本轮未实现。
+
+### DeepSeek Harness 识别与转发按真实客户端重新对齐
+
+**现象**：网关预留的 “DeepSeek Harness 客户端接口” 与真实客户端不符。日志里 DSH 请求显示的是普通 DeepSeek 图标 `~(·)><`，`scripts/gw.js logs` 解析这个图标只会命中 DeepSeek 的客户端身份，两者在日志里无法区分；账本里 `deepseek-harness` 这个客户端从未出现过。测试与文档使用的指纹字段（`deepseek-harness/1.0.0`、`x-client-name`、`x-client-version`、`x-harness-*`）在真实客户端上并不存在。
+
+**根因（附证据）**：判据是猜的，不是抓的。
+- 实际在用的客户端是 `@deepseek-ai/dsh-llm` 0.2.0-rc.2（随 DeepSeek Harness 桌面版 `resources/app.asar` 打包）。其 `lib/types/attribution.js` 每个请求发 `user-agent: deepseek-harness/0.2.0-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)`；`@deepseek-ai/dsh-llm-deepseek/lib/index.js` 在 `${messagesApiRoot(baseURL)}/messages` 上固定带 `anthropic-version: 2023-06-01`、`x-deepseek-harness-user-id`（必带）、可选的 `x-deepseek-harness-session-id` / `x-deepseek-harness-compact: 1`，凭据由提供方决定：`dsh-llm-deepseek-api-key` 发 `x-api-key`，`dsh-llm-deepseek-account` 发 `x-dsh-auth-token`。`llm-pi-ai` 只发 attribution 的 UA，另加 `authorization: Bearer`。
+- 显示层早就为 DSH 预留了独立身份：`scripts/gw.js` 的 `CLIENT_MASCOTS['deepseek-harness']` 用 `⬢[DSH]⬢` 别名解析、名称写 `DeepSeek Harness`，而 `src/server.js` 的 `CLIENT_BADGES` 给 DSH 发的是和 DeepSeek 相同的 `~(·)><`，解析回来必然还是 `deepseek`。
+- `x-dsh-auth-token` 不在 `DROP_HEADERS` 里：DSH 账户凭据会被原样转发给第三方上游。
+- 网关上没有任何 DSH 流量的证据（`usage-2026-09.jsonl` / `usage-2026-10.jsonl` 中 `clientType` 为 `deepseek-harness` 的记录为 0），说明这条链路此前没有按真实客户端验证过。
+
+**改动**：
+- `src/providers/client-headers.js`：识别改为照抄真实指纹（UA 产品标识、`x-deepseek-harness` / `x-deepseek-harness-*`、`x-dsh-auth-token`、`x-client-name: deepseek-harness`），并把 DSH 判定提到 Claude Code / Codex 启发式之前，避免带 Anthropic 风格头的 DSH 请求被抢走；删掉未经验证的 `x-harness-*` 前缀；把 `x-dsh-auth-token` 加入 `DROP_HEADERS`，与 `authorization` / `x-api-key` 一样在转发前换成上游 key。
+- `src/server.js`：`checkClientAuth` 接受 `x-dsh-auth-token`（DSH 账户提供方使用的客户端凭据头）；`CLIENT_BADGES['deepseek-harness']` 改为 `⬢[DSH]⬢`，与 `gw.js logs` 已预留的图标对齐。
+- `scripts/gw.js`：DSH 的展示图标同改为 `⬢[DSH]⬢`，启动横幅补上 DeepSeek Harness。
+- `src/providers/openai.js`：显式注明 DeepSeek 协议独有的 `tool_addition` / `tool_removal` 与 `thinking` 块在聊天补全里没有对应字段、只丢弃顺序信号，工具定义仍随 `tools` 传给上游。
+
+**验证**：
+- `scripts/test-client-routing.mjs`：fixture 换成真实 DSH 请求头，新增识别矩阵（UA 路径、仅有 `x-deepseek-harness-*` 的白标路径、账户凭据路径、带 `x-app: cli` 不被抢占、`x-harness-*` 不再算 DSH）和 “账户凭据不出上游” 断言。
+- 新增 `scripts/test-dsh-agent.mjs`：本地模拟上游上跑完整链路——逐字节透传（含 `dsh_session_log` / `dsh_plugin_packages`）、上游 SSE 原样回传、客户端凭据换成上游 key、`x-dsh-auth-token` 永不出站、错误凭据仍 401、OpenAI 路由丢弃 DeepSeek 独有顶层字段且控制块不变成文本、日志出现 `⬢[DSH]⬢` 且账本 3/3 条记为 `deepseek-harness`。
+- `scripts/test-logging.mjs` 的图标断言改为 `⬢[DSH]⬢`。
+- `npm test` 退出码 0。测试全部使用本地模拟上游，未调用真实模型。
+
+---
+
 ## 2026-09-26
 
 ### Codex 直通请求正常完成却记为 `⊘ 499 客户端断开`

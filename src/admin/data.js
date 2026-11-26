@@ -6,6 +6,8 @@ import { ROOT, redact, loadConfig } from '../config.js';
 import { readLedger, summarize, parsePeriod } from '../../scripts/usage-report.js';
 import { usageLedgerDir } from '../usage.js';
 import { calculateCostUsd } from '../pricing.js';
+import { messagesTransportFor } from '../model-series.js';
+import { calculateTraffic, emptyOutputRate, outputTokensPerSecond } from '../throughput.js';
 
 export function stripAnsi(str) {
   return typeof str === 'string' ? stripVTControlCharacters(str) : '';
@@ -340,6 +342,7 @@ export function calculateTrend(items, since, until = Date.now(), options = {}, l
 
 export function emptyTotals(name = '') {
   return {
+    ...emptyOutputRate(),
     name,
     requests: 0,
     errors: 0,
@@ -410,10 +413,11 @@ function buildSwitchboardRows(items, inflight, providerFilter) {
 export function configuredSwitchboard(cfg, providerFilter) {
   const configured = [];
   const addPlans = (route, name, model, provider) => {
+    const transport = messagesTransportFor(provider, model);
     const messagesOutput = provider.apiType === 'anthropic' ? 'messages'
-      : provider.apiType === 'openai' && provider.messagesTransport === 'responses' ? 'responses' : 'chat-completions';
+      : provider.apiType === 'openai' && transport === 'responses' ? 'responses' : 'chat-completions';
     const outputs = provider.apiType === 'openai'
-      ? provider.messagesTransport === 'responses' ? ['responses'] : ['responses', 'chat-completions']
+      ? transport === 'responses' ? ['responses'] : ['responses', 'chat-completions']
       : [messagesOutput];
     const add = (inputProtocol, upstreamProtocol) => configured.push({
       route, provider: name, model, inputProtocol, upstreamProtocol,
@@ -490,7 +494,7 @@ export async function buildOverview({
   const filtered = allHistory.filter((item) => {
     const t = Date.parse(item.time);
     if (range.since > 0 && t < range.since) return false;
-    if (range.until && t > range.until) return false;
+    if (t >= range.end) return false;
     if (provider && item.provider !== provider) return false;
     return true;
   });
@@ -501,6 +505,8 @@ export async function buildOverview({
 
   const rowToItem = (name, row) => ({
     name,
+    avgOutputTokensPerSec: row.avgOutputTokensPerSec,
+    outputTpsSamples: row.outputTpsSamples,
     requests: row.requests,
     errors: row.errors,
     cancelled: row.cancelled,
@@ -531,6 +537,8 @@ export async function buildOverview({
 
   const tot = summaryByProvider.total;
   const total = {
+    avgOutputTokensPerSec: tot.avgOutputTokensPerSec,
+    outputTpsSamples: tot.outputTpsSamples,
     requests: tot.requests,
     errors: tot.errors,
     cancelled: tot.cancelled,
@@ -547,7 +555,10 @@ export async function buildOverview({
   };
 
   const trend = calculateTrend(filtered, range.since, range.until, { step, pricing });
-  const recent = filtered.slice(-100).reverse();
+  const recent = filtered.slice(-100).reverse().map((item) => ({ ...item, outputTokensPerSec: outputTokensPerSecond(item) }));
+  const trafficEnd = Math.min(range.end, Date.now());
+  const trafficStart = range.since > 0 ? range.since : (filtered.length ? Date.parse(filtered[0].time) : trafficEnd);
+  const traffic = ledgerEnabled ? calculateTraffic(filtered, { since: trafficStart, until: Math.max(trafficStart, trafficEnd) }) : null;
 
   const gw = await fetchGatewayStatus(cfg, getGateway);
   const inflight = (gw?.stats?.inflight ?? []).filter((r) => !provider || r.provider === provider);
@@ -574,6 +585,7 @@ export async function buildOverview({
     sampledAt,
     gateway: gatewayInfo,
     total,
+    traffic,
     providers,
     models,
     // range.since/until：实际统计的起止（毫秒，until 为结束时刻）；“全部”从第一条记录算起

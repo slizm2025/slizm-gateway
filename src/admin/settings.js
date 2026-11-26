@@ -55,7 +55,7 @@ export function getSanitizedSettings(configPath) {
       apiType: p.apiType ?? 'anthropic',
       baseUrl: p.baseUrl ?? '',
       clientProfile: p.clientProfile ?? 'auto',
-      messagesTransport: p.messagesTransport ?? 'chat-completions',
+      messagesTransport: p.messagesTransport ?? 'auto',
       maxConcurrency: p.maxConcurrency ?? 3,
       maxAttempts: p.maxAttempts ?? 4,
       priceMultipliers: p.priceMultipliers && typeof p.priceMultipliers === 'object' && !Array.isArray(p.priceMultipliers) ? { ...p.priceMultipliers } : {},
@@ -164,7 +164,7 @@ export function saveSettings(newSettings, options = {}) {
       merged.apiType = pInput.apiType;
     }
     if (pInput.messagesTransport !== undefined) {
-      if (!['chat-completions', 'responses'].includes(pInput.messagesTransport)) throw new Error('Invalid messagesTransport');
+      if (!['auto', 'chat-completions', 'responses'].includes(pInput.messagesTransport)) throw new Error('Invalid messagesTransport');
       merged.messagesTransport = pInput.messagesTransport;
     }
     if (pInput.baseUrl !== undefined) {

@@ -5,6 +5,7 @@ import { join, relative } from 'node:path';
 import { ROOT } from '../src/config.js';
 import { calculateCostUsd } from '../src/pricing.js';
 import { usageLedgerDir } from '../src/usage.js';
+import { addOutputRate, emptyOutputRate } from '../src/throughput.js';
 
 // 颜色深度：NO_COLOR 关闭，FORCE_COLOR=1/2/3 强制 16 色 / 256 色 / 真彩色，否则看终端能力。
 // 输出被管道或重定向（例如 Claude Code 的 Bash 工具）时不带颜色码。
@@ -319,6 +320,7 @@ export function readLedger(dir, since = 0) {
 
 function emptyRow() {
   return {
+    ...emptyOutputRate(),
     requests: 0, errors: 0, cancelled: 0, unreported: 0,
     input: 0, cacheRead: 0, cacheWrite: 0, output: 0, durationMs: 0,
     costUsd: 0, baseCostUsd: 0, pricedRequests: 0, unpricedRequests: 0,
@@ -334,6 +336,7 @@ function itemCost(item, pricing) {
 }
 
 function addItem(row, item, pricing) {
+  addOutputRate(row, item);
   row.requests++;
   if (item.status === 499) row.cancelled++;
   else if (!(item.status >= 200 && item.status < 400)) row.errors++;

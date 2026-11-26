@@ -219,8 +219,9 @@
 
   <div id="auth-expired-banner" class="banner banner-danger hidden">
     <div class="banner-content">
-      <strong>管理页面未登录或登录已过期</strong>：请在终端执行 <code class="num-font">node scripts/gw.js web</code> 重新打开控制台。
+      <strong>管理页面未登录或会话已失效</strong>：点击重新连接或刷新页面可自动恢复；若服务未运行请执行 <code class="num-font">node scripts/gw.js open</code>。
     </div>
+    <button id="btn-reconnect-session" class="btn btn-secondary btn-compact" type="button">重新连接</button>
   </div>
 
   <main class="app-main">
@@ -442,6 +443,16 @@
         </div>
       </div>
 
+      <section class="traffic-summary" aria-label="TPS 统计">
+        <h2>Token 吞吐量</h2>
+        <dl>
+          <div><dt>末 60 秒 TPS</dt><dd id="m-tps-current" class="num-font">-</dd></div>
+          <div><dt>分钟峰值 TPS</dt><dd id="m-tps-peak" class="num-font">-</dd></div>
+          <div><dt>时段平均 TPS</dt><dd id="m-tps-avg" class="num-font">-</dd></div>
+          <div><dt>平均输出 TPS</dt><dd id="m-output-tps" class="num-font">-</dd></div>
+        </dl>
+      </section>
+
       <!-- 趋势图表区 (Canvas 自绘) -->
       <div class="section-container">
         <div class="section-header">
@@ -553,10 +564,11 @@
                 <th title="缓存读取 / (普通输入 + 缓存读取 + 缓存写入)">缓存命中率</th>
                 <th>费用（原价 USD）</th>
                 <th>计费覆盖</th>
+                <th title="成功请求输出 token / 总耗时的算术平均，单位 tok/s">平均输出 TPS</th>
               </tr>
             </thead>
             <tbody>
-              <tr><td colspan="9" class="text-center text-muted">暂无数据</td></tr>
+              <tr><td colspan="10" class="text-center text-muted">暂无数据</td></tr>
             </tbody>
           </table>
         </div>
@@ -579,10 +591,11 @@
                 <th title="缓存读取 / (普通输入 + 缓存读取 + 缓存写入)">缓存命中率</th>
                 <th>费用（原价 USD）</th>
                 <th>计费覆盖</th>
+                <th title="成功请求输出 token / 总耗时的算术平均，单位 tok/s">平均输出 TPS</th>
               </tr>
             </thead>
             <tbody>
-              <tr><td colspan="8" class="text-center text-muted">暂无数据</td></tr>
+              <tr><td colspan="9" class="text-center text-muted">暂无数据</td></tr>
             </tbody>
           </table>
         </div>
@@ -606,10 +619,11 @@
                 <th>Tokens (入 / 出 / 缓存)</th>
                 <th>用量来源</th>
                 <th>费用（原价 USD）</th>
+                <th title="输出 token / 总耗时，含排队、重试和首 token 等待，单位 tok/s">输出 TPS</th>
               </tr>
             </thead>
             <tbody>
-              <tr><td colspan="9" class="text-center text-muted">暂无历史记录</td></tr>
+              <tr><td colspan="10" class="text-center text-muted">暂无历史记录</td></tr>
             </tbody>
           </table>
         </div>
@@ -884,11 +898,11 @@
 
         <div class="settings-read-section">
           <div class="section-header">
-            <h3 class="section-title">上游服务商</h3>
+            <h3 class="section-title">上游提供商</h3>
             <div class="section-tools">
               <button class="btn btn-secondary btn-compact" type="button" data-settings-open="provider:new">
                 <svg class="lucide-icon" viewBox="0 0 24 24"><use href="#icon-plus"/></svg>
-                <span>添加服务商</span>
+                <span>添加提供商</span>
               </button>
             </div>
           </div>
@@ -910,7 +924,7 @@
               <thead>
                 <tr>
                   <th>路由别名</th>
-                  <th>目标服务商</th>
+                  <th>目标提供商</th>
                   <th>目标模型</th>
                   <th>客户端配置</th>
                   <th class="th-action">操作</th>

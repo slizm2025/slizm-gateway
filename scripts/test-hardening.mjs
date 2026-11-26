@@ -211,8 +211,8 @@ test('gateway profile routing, retry identity and optional upstream authenticati
   const dir = await mkdtemp(join(tmpdir(), 'gw-profile-e2e-'));
   const path = join(dir, 'providers.json');
   await writeFile(path, JSON.stringify({ clientToken: 'client-fixture', providers: [
-    { name: 'mixed', baseUrl, apiKey: 'key', apiType: 'openai', models: { inner: 'gpt-retry' } },
-    { name: 'anon', baseUrl, apiType: 'openai', requireKey: false },
+    { name: 'mixed', baseUrl, apiKey: 'key', apiType: 'openai', messagesTransport: 'chat-completions', models: { inner: 'gpt-retry' } },
+    { name: 'anon', baseUrl, apiType: 'openai', messagesTransport: 'chat-completions', requireKey: false },
     { name: 'anth', baseUrl, apiKey: 'key', apiType: 'anthropic' },
     { name: 'gemini', baseUrl, apiKey: 'key', apiType: 'gemini' },
   ], routes: {

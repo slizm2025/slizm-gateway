@@ -7,6 +7,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, env, redact } from './config.js';
 import { calculateCostUsd, modelPrice } from './pricing.js';
+import { addOutputRate, calculateTraffic, emptyOutputRate, outputTokensPerSecond } from './throughput.js';
 
 const MAX_RECENT = 200;
 const SWITCHBOARD_RETAINED_TTL_MS = 5 * 60 * 1000;
@@ -17,6 +18,7 @@ const routes = new Map();
 const models = new Map();
 const inflight = new Set();
 const recent = [];
+const trafficSamples = [];
 const switchboardRetained = new Map();
 
 function switchboardTopologyKey(item) {
@@ -61,6 +63,7 @@ function retainSwitchboardTopology(item) {
 
 function bucket() {
   return {
+    ...emptyOutputRate(),
     requests: 0,
     successes: 0,
     errors: 0,
@@ -231,9 +234,11 @@ export function finishUsage(entry, { status = 500, usage, error } = {}) {
   if (price) item.unitPrice = { input: price.input, output: price.output, cacheRead: price.cacheRead, cacheWrite: price.cacheWrite };
   item.costUsd = u ? calculateCostUsd(u, entry.pricing, entry.model, entry.priceMultiplier) : null;
   if (error) item.error = summarizeError(error);
+  item.outputTokensPerSec = outputTokensPerSecond(item);
   entry.result = item;
 
   for (const target of [totals, get(providers, entry.provider), get(routes, entry.route), get(models, entry.model)]) {
+    addOutputRate(target, item);
     if (code === 499) target.cancelled++;
     else if (code >= 200 && code < 400) target.successes++;
     else target.errors++;
@@ -251,13 +256,22 @@ export function finishUsage(entry, { status = 500, usage, error } = {}) {
   }
   recent.push(item);
   if (recent.length > MAX_RECENT) recent.shift();
+  trafficSamples.push(item);
+  pruneTraffic(Date.now());
   appendLedger(item);
   return item;
+}
+
+function pruneTraffic(now) {
+  let expired = 0;
+  while (expired < trafficSamples.length && Date.parse(trafficSamples[expired].time) < now - 60_000) expired++;
+  if (expired) trafficSamples.splice(0, expired);
 }
 
 export function usageStats({ activeRequests = inflight.size } = {}) {
   const now = performance.now();
   const wallNow = Date.now();
+  pruneTraffic(wallNow);
   pruneSwitchboardRetained(wallNow);
   const dir = usageLedgerDir();
   return {
@@ -266,6 +280,7 @@ export function usageStats({ activeRequests = inflight.size } = {}) {
     activeRequests,
     ledger: dir ? ledgerFile(dir) : null,
     totals: { ...totals },
+    traffic: calculateTraffic(trafficSamples, { since: wallNow + 1 - 60_000, until: wallNow + 1 }),
     providers: copyMap(providers),
     routes: copyMap(routes),
     models: copyMap(models),

@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { responsesToAnthropic, anthropicToResponses } from '../src/providers/responses.js';
+import { responsesToAnthropic, anthropicToResponses, anthropicToResponsesStream } from '../src/providers/responses.js';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CLIENT_TOKEN = 'responses-client';
@@ -90,6 +90,41 @@ test('Responses response conversion emits text and function-call output', () => 
   assert.deepEqual(out.usage, { input_tokens: 2, output_tokens: 3, total_tokens: 5 });
 });
 
+test('Responses JSON and SSE include cached input in total input and retain cache details', async () => {
+  const usage = { input_tokens: 20, cache_read_input_tokens: 80, cache_creation_input_tokens: 10, output_tokens: 3 };
+  const expected = { input_tokens: 110, output_tokens: 3, total_tokens: 113, input_tokens_details: { cached_tokens: 80, cache_write_tokens: 10 } };
+  assert.deepEqual(anthropicToResponses({ content: [], usage }, 'test').usage, expected);
+  const frames = [
+    { type: 'message_start', message: { id: 'msg_cache', usage: { ...usage, output_tokens: 0 } } },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3, input_tokens: null, cache_read_input_tokens: null } },
+    { type: 'message_stop' },
+  ];
+  const body = new Response(frames.map(frame => 'data: ' + JSON.stringify(frame) + '\n\n').join('')).body;
+  const observed = [];
+  const events = sseEvents(await new Response(anthropicToResponsesStream(body, 'test', { onUsage: value => observed.push(value) })).text());
+  assert.deepEqual(observed[0], { ...usage, output_tokens: 0 });
+  assert.deepEqual(events.find(event => event.event === 'response.completed').data.response.usage, expected);
+});
+
+test('reverse Responses usage carries cache_write_tokens only when writes are reported', () => {
+  // 只上报读：只出 standard cached_tokens，不凭空补 cache_write_tokens
+  assert.deepEqual(anthropicToResponses({ content: [], usage: { input_tokens: 5, cache_read_input_tokens: 7, output_tokens: 1 } }, 'test').usage, {
+    input_tokens: 12, output_tokens: 1, total_tokens: 13, input_tokens_details: { cached_tokens: 7 },
+  });
+  // 只上报写：只出兼容 cache_write_tokens，不加 cached_tokens
+  assert.deepEqual(anthropicToResponses({ content: [], usage: { input_tokens: 5, cache_creation_input_tokens: 9, output_tokens: 1 } }, 'test').usage, {
+    input_tokens: 14, output_tokens: 1, total_tokens: 15, input_tokens_details: { cache_write_tokens: 9 },
+  });
+  // 显式零写入也保留兼容字段
+  assert.deepEqual(anthropicToResponses({ content: [], usage: { input_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1 } }, 'test').usage, {
+    input_tokens: 5, output_tokens: 1, total_tokens: 6, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+  });
+  // 完全没有缓存来源：整个 details 缺省
+  assert.deepEqual(anthropicToResponses({ content: [], usage: { input_tokens: 5, output_tokens: 1 } }, 'test').usage, {
+    input_tokens: 5, output_tokens: 1, total_tokens: 6,
+  });
+});
+
 test('Messages route uses configured Responses transport and converts back to Anthropic', async (t) => {
   const seen = [];
   const upstream = http.createServer(async (req, res) => {
@@ -149,7 +184,8 @@ test('Responses compatibility remains for unknown OpenAI clients and Codex Anthr
   await writeFile(config, JSON.stringify({
     clientToken: CLIENT_TOKEN,
     providers: [
-      { name: 'openai', apiType: 'openai', baseUrl, apiKey: OPENAI_KEY, models: {} },
+      // 这个用例只验证 chat semantics 的兼容路径，显式声明 chat，避免 auto 把 GPT 路由到 /responses
+      { name: 'openai', apiType: 'openai', baseUrl, apiKey: OPENAI_KEY, messagesTransport: 'chat-completions', models: {} },
       { name: 'anthropic', apiType: 'anthropic', baseUrl, apiKey: ANTHROPIC_KEY, models: {} },
     ],
     routes: {
@@ -469,6 +505,12 @@ test('Codex OpenAI /v1/responses uses lossless direct passthrough', async (t) =>
 
   const stats = await fetch(base + '/v1/usage', { headers: { authorization: 'Bearer ' + CLIENT_TOKEN } }).then((r) => r.json());
   assert.equal(stats.totals.cacheReadTokens, 280);
+  const outputSamples = stats.recent.filter((row) => row.outputTokensPerSec !== null);
+  assert.ok(outputSamples.length >= 2, 'native JSON and SSE both produce output TPS');
+  for (const row of outputSamples) {
+    assert.equal(row.outputTokensPerSec, row.outputTokens * 1000 / row.durationMs);
+  }
+  assert.equal(stats.totals.outputTpsSamples, outputSamples.length);
 
   await t.test('forwards SSE headers before the first body chunk', async () => {
     const start = logs.length;
@@ -495,6 +537,7 @@ test('Codex OpenAI /v1/responses uses lossless direct passthrough', async (t) =>
     assert.match(line, /✗ responses/);
     const usage = await fetch(base + '/v1/usage', { headers: { authorization: 'Bearer ' + CLIENT_TOKEN } }).then((r) => r.json());
     assert.equal(usage.recent.at(-1).status, 502);
+    assert.equal(usage.recent.at(-1).outputTokensPerSec, null);
   });
 
   await t.test('a transport reset after the terminal event does not break a completed response', async () => {
@@ -503,4 +546,189 @@ test('Codex OpenAI /v1/responses uses lossless direct passthrough', async (t) =>
     assert.equal(await result.text(), responseSse);
     assert.match(await waitForLog(() => logs, start, /[←✗] responses codex-openai/), /← responses/);
   });
+});
+
+test('Messages auto transport sends GPT to /responses and non-GPT or explicit chat to /chat/completions', async (t) => {
+  const seen = [];
+  const SESSION = 'claude-code-session-fixed';
+  const upstream = http.createServer((req, res) => {
+    readBody(req).then(({ body }) => {
+      seen.push({ path: req.url, headers: req.headers, body });
+      if (req.url === '/responses') {
+        if (body.stream) {
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+          // 分段 usage：先报输入 100，终止事件只报 cached 80
+          res.write('event: response.in_progress\ndata: ' + JSON.stringify({ type: 'response.in_progress', response: { usage: { input_tokens: 100 } } }) + '\n\n');
+          res.write('event: response.output_text.delta\ndata: ' + JSON.stringify({ type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'streamed ok' }) + '\n\n');
+          res.write('event: response.completed\ndata: ' + JSON.stringify({ type: 'response.completed', response: { id: 'resp_stream', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'streamed ok' }] }], usage: { input_tokens_details: { cached_tokens: 80 } } } }) + '\n\n');
+          return res.end();
+        }
+        return json(res, { id: 'resp_json', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'responses json ok' }] }], usage: { input_tokens: 5, output_tokens: 2 } });
+      }
+      if (req.url === '/chat/completions') return json(res, openAiText());
+      res.writeHead(404);
+      return res.end();
+    }).catch((error) => { res.writeHead(500); res.end(JSON.stringify({ error: error.message })); });
+  });
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  const baseUrl = 'http://127.0.0.1:' + upstream.address().port;
+  const dir = await mkdtemp(join(tmpdir(), 'gateway-messages-transport-'));
+  const config = join(dir, 'providers.json');
+  await writeFile(config, JSON.stringify({
+    clientToken: CLIENT_TOKEN,
+    providers: [
+      { name: 'gpt-auto', apiType: 'openai', baseUrl, apiKey: OPENAI_KEY, models: {} },
+      { name: 'gpt-chat', apiType: 'openai', baseUrl, apiKey: OPENAI_KEY, messagesTransport: 'chat-completions', models: {} },
+      { name: 'nongpt-auto', apiType: 'openai', baseUrl, apiKey: OPENAI_KEY, models: {} },
+    ],
+    routes: {
+      'claude-gpt': { provider: 'gpt-auto', model: 'gpt-6-sol' },
+      'claude-gpt-chat': { provider: 'gpt-chat', model: 'gpt-6-sol' },
+      'claude-nongpt': { provider: 'nongpt-auto', model: 'deepseek-chat' },
+    },
+  }));
+  const gateway = spawn(process.execPath, ['src/server.js'], { cwd: ROOT, env: { ...process.env, GATEWAY_CONFIG: config, GATEWAY_HOST: '127.0.0.1', GATEWAY_PORT: '0', GATEWAY_USAGE_DIR: 'off' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let logs = '';
+  gateway.stdout.on('data', (chunk) => { logs += chunk; });
+  gateway.stderr.on('data', (chunk) => { logs += chunk; });
+  t.after(async () => {
+    if (gateway.exitCode === null) { gateway.kill(); await once(gateway, 'exit'); }
+    upstream.closeAllConnections(); upstream.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  for (let i = 0; i < 100 && !/http:\/\/127\.0\.0\.1:\d+/.test(logs); i++) await wait(25);
+  const base = /http:\/\/127\.0\.0\.1:\d+/.exec(logs)?.[0];
+  assert.ok(base, logs);
+  const sendMessages = (body) => fetch(base + '/v1/messages', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + CLIENT_TOKEN, 'content-type': 'application/json', 'x-claude-code-session-id': SESSION },
+    body: JSON.stringify(body),
+  });
+  const usageRow = async (match) => {
+    for (let i = 0; i < 100; i++) {
+      const stats = await fetch(base + '/v1/usage', { headers: { authorization: 'Bearer ' + CLIENT_TOKEN } }).then((r) => r.json());
+      const row = stats.recent.find(match);
+      if (row) return row;
+      await wait(20);
+    }
+    assert.fail('usage row not found');
+  };
+
+  // 1. auto + GPT 非流式 → /responses：检查 instructions / input / tools / store:false / assistant output_text
+  const jsonResponse = await sendMessages({
+    model: 'claude-gpt', system: 'be brief', max_tokens: 32, stream: false,
+    messages: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: [{ type: 'text', text: 'prior' }, { type: 'tool_use', id: 'call_1', name: 'exec', input: { cmd: 'pwd' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'pwd-output' }] },
+      { role: 'user', content: 'now what?' },
+    ],
+    tools: [{ name: 'exec', description: 'run', input_schema: { type: 'object', properties: { cmd: { type: 'string' } } } }],
+  });
+  const jsonBody = await jsonResponse.json();
+  assert.equal(jsonResponse.status, 200, JSON.stringify(jsonBody));
+  assert.equal(jsonBody.content[0].text, 'responses json ok');
+  const jsonRequest = seen.find((item) => item.path === '/responses' && item.body.stream === false);
+  assert.ok(jsonRequest, 'auto GPT 非流式应走 /responses');
+  assert.equal(jsonRequest.body.model, 'gpt-6-sol');
+  assert.equal(jsonRequest.body.instructions, 'be brief');
+  assert.equal(jsonRequest.body.store, false);
+  assert.equal(jsonRequest.body.max_output_tokens, 32);
+  assert.equal(jsonRequest.body.tools[0].type, 'function');
+  assert.deepEqual(jsonRequest.body.input, [
+    { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+    { role: 'assistant', content: [{ type: 'output_text', text: 'prior' }] },
+    { type: 'function_call', call_id: 'call_1', name: 'exec', arguments: '{"cmd":"pwd"}' },
+    { type: 'function_call_output', call_id: 'call_1', output: 'pwd-output' },
+    { role: 'user', content: [{ type: 'input_text', text: 'now what?' }] },
+  ]);
+  assert.equal(jsonRequest.headers.originator, 'Codex Desktop', 'Claude Code + GPT 使用 codex 头 profile');
+  assert.equal(typeof jsonRequest.body.prompt_cache_key, 'string');
+
+  // 2. 同一固定 session 再发流式请求：session-id / prompt_cache_key 稳定，每轮 turn 请求 ID 变化
+  const streamResponse = await sendMessages({ model: 'claude-gpt', system: 'be brief', max_tokens: 32, stream: true, messages: [{ role: 'user', content: 'stream please' }] });
+  const streamText = await streamResponse.text();
+  assert.equal(streamResponse.status, 200, streamText);
+  assert.match(streamResponse.headers.get('content-type') ?? '', /text\/event-stream/);
+  assert.match(streamText, /streamed ok/);
+  const streamRequest = seen.find((item) => item.path === '/responses' && item.body.stream === true);
+  assert.ok(streamRequest, 'auto GPT 流式应走 /responses');
+  assert.equal(streamRequest.headers['session-id'], jsonRequest.headers['session-id'], '同一会话 session-id 稳定');
+  assert.equal(streamRequest.body.prompt_cache_key, jsonRequest.body.prompt_cache_key, '同一会话 prompt_cache_key 稳定');
+  assert.equal(streamRequest.body.prompt_cache_key, streamRequest.headers['session-id']);
+  assert.notEqual(streamRequest.headers['x-client-request-id'], jsonRequest.headers['x-client-request-id'], '每轮 turn 请求 ID 不同');
+
+  // 分段 usage：in_progress 报 input 100，terminal 只报 cached 80 → 账本最终 input 20 / 缓存读 80
+  const row = await usageRow((item) => item.route === 'claude-gpt' && item.cacheReadTokens === 80);
+  assert.equal(row.inputTokens, 20);
+  assert.equal(row.cacheReadTokens, 80);
+  assert.equal(row.outputTokens, 0);
+  assert.equal(row.upstreamProtocol, 'responses');
+  assert.equal(row.adapter, 'messages-to-responses');
+
+  // 3. 显式 chat 的 GPT 路由走 /chat/completions
+  const chatResponse = await sendMessages({ model: 'claude-gpt-chat', max_tokens: 16, messages: [{ role: 'user', content: 'chat please' }] });
+  const chatBody = await chatResponse.json();
+  assert.equal(chatResponse.status, 200, JSON.stringify(chatBody));
+  assert.equal(chatBody.content[0].text, 'openai gateway ok');
+  assert.ok(seen.some((item) => item.path === '/chat/completions' && item.body.model === 'gpt-6-sol'), '显式 chat 的 GPT 路由应走 /chat/completions');
+
+  // 4. auto + 非 GPT（deepseek-chat）走 /chat/completions
+  const nongptResponse = await sendMessages({ model: 'claude-nongpt', max_tokens: 16, messages: [{ role: 'user', content: 'deepseek please' }] });
+  assert.equal(nongptResponse.status, 200, await nongptResponse.text());
+  assert.ok(seen.some((item) => item.path === '/chat/completions' && item.body.model === 'deepseek-chat'), 'auto 非 GPT 路由应走 /chat/completions');
+});
+
+test('native Codex Responses merges usage reported before a partial terminal event', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    readBody(req).then(({ body }) => {
+      seen.push({ path: req.url, body });
+      if (req.url !== '/v1/responses') { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
+      // 终止事件前先报输入 100，response.completed 只带 cached 80
+      res.write('event: response.created\ndata: ' + JSON.stringify({ type: 'response.created', response: { id: 'resp_seg' } }) + '\n\n');
+      res.write('event: response.in_progress\ndata: ' + JSON.stringify({ type: 'response.in_progress', response: { id: 'resp_seg', usage: { input_tokens: 100 } } }) + '\n\n');
+      res.write('event: response.output_text.delta\ndata: ' + JSON.stringify({ type: 'response.output_text.delta', delta: 'seg' }) + '\n\n');
+      res.write('event: response.completed\ndata: ' + JSON.stringify({ type: 'response.completed', response: { id: 'resp_seg', status: 'completed', usage: { input_tokens_details: { cached_tokens: 80 } } } }) + '\n\n');
+      return res.end();
+    }).catch((error) => { res.writeHead(500); res.end(JSON.stringify({ error: error.message })); });
+  });
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  const baseUrl = 'http://127.0.0.1:' + upstream.address().port;
+  const dir = await mkdtemp(join(tmpdir(), 'gateway-responses-segment-'));
+  const config = join(dir, 'providers.json');
+  await writeFile(config, JSON.stringify({
+    clientToken: CLIENT_TOKEN,
+    providers: [{ name: 'openai', apiType: 'openai', baseUrl: baseUrl + '/v1', apiKey: OPENAI_KEY, models: {} }],
+    routes: { 'codex-seg': { provider: 'openai', model: 'gpt-6-sol' } },
+  }));
+  const gateway = spawn(process.execPath, ['src/server.js'], { cwd: ROOT, env: { ...process.env, GATEWAY_CONFIG: config, GATEWAY_HOST: '127.0.0.1', GATEWAY_PORT: '0', GATEWAY_USAGE_DIR: 'off' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let logs = '';
+  gateway.stdout.on('data', (chunk) => { logs += chunk; });
+  gateway.stderr.on('data', (chunk) => { logs += chunk; });
+  t.after(async () => {
+    if (gateway.exitCode === null) { gateway.kill(); await once(gateway, 'exit'); }
+    upstream.closeAllConnections(); upstream.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  for (let i = 0; i < 100 && !/http:\/\/127\.0\.0\.1:\d+/.test(logs); i++) await wait(25);
+  const base = /http:\/\/127\.0\.0\.1:\d+/.exec(logs)?.[0];
+  assert.ok(base, logs);
+  const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { ...codexHeaders, authorization: 'Bearer ' + CLIENT_TOKEN, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'codex-seg', input: 'hello', stream: true }) });
+  const streamText = await response.text();
+  assert.equal(response.status, 200, streamText);
+  assert.match(streamText, /response\.completed/);
+  // createResponsesMonitor 逐段合并 usage：终止事件缺 input_tokens 时保留先到的 100，并与 cached 80 拆分成 input 20
+  let row;
+  for (let i = 0; i < 100 && !row; i++) {
+    const stats = await fetch(base + '/v1/usage', { headers: { authorization: 'Bearer ' + CLIENT_TOKEN } }).then((r) => r.json());
+    row = stats.recent.find((item) => item.route === 'codex-seg');
+    if (!row) await wait(20);
+  }
+  assert.ok(row, '账本应记录该请求');
+  assert.equal(row.inputTokens, 20);
+  assert.equal(row.cacheReadTokens, 80);
+  assert.equal(row.upstreamProtocol, 'responses');
+  assert.equal(seen.at(-1).body.model, 'gpt-6-sol');
 });

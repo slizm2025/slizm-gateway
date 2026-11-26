@@ -9,7 +9,7 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { anthropicUsageFromOpenAI, toAnthropicResponse, parseCompletion } from '../src/providers/openai.js';
+import { anthropicUsageFromOpenAI, mergeOpenAIUsage, toAnthropicResponse, parseCompletion } from '../src/providers/openai.js';
 import { openAIToAnthropicStream } from '../src/stream.js';
 import { adaptBodyForModelSeries, modelSeries } from '../src/model-series.js';
 import { beginUsage, recordStreamUsage, finishUsage, usageStats, summarizeError, ledgerFile } from '../src/usage.js';
@@ -56,7 +56,7 @@ async function listen(server) {
 test('OpenAI usage 换算成 Anthropic 语义：缓存读取与写入从总输入拆出', () => {
   assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 80 } }), { input_tokens: 20, output_tokens: 7, cache_read_input_tokens: 80 });
   assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 50, completion_tokens: 1, prompt_cache_hit_tokens: 30, prompt_cache_miss_tokens: 20 }), { input_tokens: 20, output_tokens: 1, cache_read_input_tokens: 30 });
-  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 52420, completion_tokens: 13, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 52352 } }), { input_tokens: 68, output_tokens: 13, cache_creation_input_tokens: 52352 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 52420, completion_tokens: 13, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 52352 } }), { input_tokens: 68, output_tokens: 13, cache_read_input_tokens: 0, cache_creation_input_tokens: 52352 });
   assert.deepEqual(anthropicUsageFromOpenAI({ input_tokens: 100, output_tokens: 3, input_tokens_details: { cached_tokens: 30, cache_write_tokens: 60 } }), { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 30, cache_creation_input_tokens: 60 });
   assert.deepEqual(anthropicUsageFromOpenAI({ input_tokens: 100, output_tokens: 3, input_tokens_details: { cached_tokens: 30, cache_creation_tokens: 60 } }), { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 30, cache_creation_input_tokens: 60 });
   assert.deepEqual(anthropicUsageFromOpenAI({ input_tokens: 100, output_tokens: 3, cached_tokens: 30, cache_write_tokens: 60 }), { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 30, cache_creation_input_tokens: 60 });
@@ -66,6 +66,100 @@ test('OpenAI usage 换算成 Anthropic 语义：缓存读取与写入从总输�
   assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 52420, completion_tokens: 13, prompt_cache_miss_tokens: 52352 }), { input_tokens: 52420, output_tokens: 13 });
   assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 5, completion_tokens: 7 }), { input_tokens: 5, output_tokens: 7 });
   assert.deepEqual(anthropicUsageFromOpenAI(undefined), {});
+});
+
+test('OpenAI usage 缓存别名：零与非法值不遮蔽后续正值，非零取优先级高者且不累加', () => {
+  // 高位别名上报 0 时，低位的正值仍然生效（零遮蔽）
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 1, cached_tokens: 0, cache_read_tokens: 40 }), { input_tokens: 60, output_tokens: 1, cache_read_input_tokens: 40 });
+  // 非法值（负数 / 小数 / 非数字）同样不遮蔽后续正值
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 1, cached_tokens: -5, cache_read_tokens: 40 }), { input_tokens: 60, output_tokens: 1, cache_read_input_tokens: 40 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 1, input_tokens_details: { cached_tokens: 1.5 }, cache_read_input_tokens: 40 }), { input_tokens: 60, output_tokens: 1, cache_read_input_tokens: 40 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 1, input_tokens_details: { cache_write_tokens: 'x' }, cache_write_tokens: 25 }), { input_tokens: 75, output_tokens: 1, cache_creation_input_tokens: 25 });
+  // 多个非零别名同时存在：只取优先级最高者，不累加
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 1, cached_tokens: 30, cache_read_tokens: 20 }), { input_tokens: 70, output_tokens: 1, cache_read_input_tokens: 30 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 1, input_tokens_details: { cached_tokens: 30 }, prompt_tokens_details: { cached_tokens: 20 } }), { input_tokens: 70, output_tokens: 1, cache_read_input_tokens: 30 });
+  // 全部别名都是 0：视为明确上报零，输出零缓存字段；完全没有缓存字段时不输出
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 1, cached_tokens: 0 }), { input_tokens: 100, output_tokens: 1, cache_read_input_tokens: 0 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_tokens: 100, completion_tokens: 1 }), { input_tokens: 100, output_tokens: 1 });
+});
+
+test('OpenAI usage 只有输出或只有缓存时不编造总量', () => {
+  // 只有输出：不凭空生成 input_tokens = 0
+  assert.deepEqual(anthropicUsageFromOpenAI({ completion_tokens: 5 }), { output_tokens: 5 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ output_tokens: 0 }), { output_tokens: 0 });
+  // 只有缓存：保留合法缓存读写，但不编造输入 / 输出总量
+  assert.deepEqual(anthropicUsageFromOpenAI({ cache_read_tokens: 30 }), { cache_read_input_tokens: 30 });
+  assert.deepEqual(anthropicUsageFromOpenAI({ cached_tokens: 0 }), { cache_read_input_tokens: 0 });
+  for (const cached_tokens of [false, true, '', ' ', [], {}]) {
+    assert.deepEqual(anthropicUsageFromOpenAI({ cached_tokens }), {});
+  }
+  assert.deepEqual(anthropicUsageFromOpenAI({ prompt_cache_miss_tokens: 20 }), {});
+  assert.deepEqual(anthropicUsageFromOpenAI({}), {});
+});
+
+test('OpenAI 分段 usage 合并：只覆盖非空字段，details 逐字段浅合并，显式 0 覆盖', () => {
+  // details 分段嵌套：后到的分段不丢先到的缓存字段
+  assert.deepEqual(mergeOpenAIUsage(
+    { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 80 } },
+    { completion_tokens: 5, prompt_tokens_details: { cache_write_tokens: 10 } },
+  ), { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 80, cache_write_tokens: 10 } });
+  // null / undefined 不覆盖已有值
+  assert.deepEqual(mergeOpenAIUsage(
+    { input_tokens: 20, cache_read_input_tokens: 5 },
+    { input_tokens: null, cache_read_input_tokens: undefined, output_tokens: 3 },
+  ), { input_tokens: 20, cache_read_input_tokens: 5, output_tokens: 3 });
+  // 显式 0 覆盖旧正值，且不修改入参
+  const prev = { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 80 } };
+  assert.deepEqual(mergeOpenAIUsage(prev, { prompt_tokens_details: { cached_tokens: 0 }, completion_tokens: 0 }), { prompt_tokens: 100, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } });
+  assert.deepEqual(prev, { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 80 } });
+  assert.deepEqual(mergeOpenAIUsage(undefined, { input_tokens_details: { cached_tokens: 3 } }), { input_tokens_details: { cached_tokens: 3 } });
+});
+
+test('流式 usage 分段：只带输出的片段不覆盖输入，显式零缓存覆盖旧正值', async () => {
+  const usages = [];
+  const list = events(await new Response(openAIToAnthropicStream(sseBody([
+    chunk({ content: 'ok' }),
+    chunk({}, 'stop'),
+    { id: 'up', choices: [], usage: { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 80 } } },
+    { id: 'up', choices: [], usage: { completion_tokens: 9 } },
+    '[DONE]',
+  ]), 'alias', { onUsage: (u) => usages.push(u) })).text());
+  const final = list.find((e) => e.type === 'message_delta');
+  assert.deepEqual(final.usage, { input_tokens: 20, output_tokens: 9, cache_read_input_tokens: 80 });
+  assert.deepEqual(usages.at(-1), final.usage);
+
+  const override = events(await new Response(openAIToAnthropicStream(sseBody([
+    chunk({ content: 'ok' }),
+    chunk({}, 'stop'),
+    { id: 'up', choices: [], usage: { prompt_tokens: 100, completion_tokens: 9, prompt_tokens_details: { cached_tokens: 80 } } },
+    { id: 'up', choices: [], usage: { completion_tokens: 9, prompt_tokens_details: { cached_tokens: 0 } } },
+    '[DONE]',
+  ]), 'alias')).text());
+  assert.deepEqual(override.find((e) => e.type === 'message_delta').usage, { input_tokens: 100, output_tokens: 9, cache_read_input_tokens: 0 });
+});
+
+test('嵌套 usage 分段不会把账本 80% 命中率稀释为 44.4%', async (t) => {
+  const previous = process.env.GATEWAY_USAGE_DIR;
+  process.env.GATEWAY_USAGE_DIR = 'off';
+  t.after(() => {
+    if (previous === undefined) delete process.env.GATEWAY_USAGE_DIR;
+    else process.env.GATEWAY_USAGE_DIR = previous;
+  });
+  const entry = beginUsage({ requestId: 'nested-cache-regression', route: 'fixture', provider: 'fixture', model: 'fixture' });
+  const payloads = [
+    chunk({ content: 'ok' }),
+    chunk({}, 'stop'),
+    { choices: [], usage: { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 80 } } },
+    { choices: [], usage: { prompt_tokens: null, completion_tokens: 2, prompt_tokens_details: { cached_tokens: null, reasoning_tokens: 0 } } },
+    '[DONE]',
+  ];
+  await new Response(openAIToAnthropicStream(sseBody(payloads), 'fixture', { onUsage: value => recordStreamUsage(entry, value) })).text();
+  const result = finishUsage(entry, { status: 200 });
+  assert.equal(result.inputTokens, 20);
+  assert.equal(result.cacheReadTokens, 80);
+  assert.equal(result.cacheReadTokens / (result.inputTokens + result.cacheReadTokens), 0.8);
+  const merged = await parseCompletion(new Response(sseText(payloads), { headers: { 'content-type': 'text/event-stream' } }));
+  assert.deepEqual(anthropicUsageFromOpenAI(merged.usage), { input_tokens: 20, output_tokens: 2, cache_read_input_tokens: 80 });
 });
 
 test('模型价格按每百万 token 计算美元费用', () => {
@@ -260,8 +354,9 @@ test('端到端：经网关的请求写入账本，/v1/usage 与 gw.js tokens �
   const upstream = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => raw += c);
-    req.on('end', () => {
+    req.on('end', async () => {
       const body = JSON.parse(raw);
+      await new Promise((resolve) => setTimeout(resolve, 10));
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       if (req.url === '/v1/messages') {
         observed = body;
@@ -290,7 +385,7 @@ test('端到端：经网关的请求写入账本，/v1/usage 与 gw.js tokens �
     clientToken: 'usage-client',
     providers: [
       { name: 'anth', apiType: 'anthropic', apiKey: 'fake-anthropic-key', baseUrl: `http://127.0.0.1:${upPort}` },
-      { name: 'oai', apiType: 'openai', apiKey: 'fake-openai-key', baseUrl: `http://127.0.0.1:${upPort}` },
+      { name: 'oai', apiType: 'openai', messagesTransport: 'chat-completions', apiKey: 'fake-openai-key', baseUrl: `http://127.0.0.1:${upPort}` },
     ],
     routes: { opus: { provider: 'anth', model: 'claude-opus-5-5' }, sol: { provider: 'oai', model: 'gpt-6-sol' } },
   }));
@@ -345,8 +440,18 @@ test('端到端：经网关的请求写入账本，/v1/usage 与 gw.js tokens �
   assert.equal(stats.totals.cacheReadTokens, 3800);
   assert.equal(stats.models['claude-opus-5-5'].reportedOutputTokens, 42);
   assert.equal(stats.models['gpt-6-sol'].reportedInputTokens, 100);
+  assert.equal(stats.traffic.tokenConsumed, 4177);
+  assert.equal(stats.traffic.tps.current, 4177 / 60);
+  assert.equal(stats.totals.outputTpsSamples, 2);
 
   const ledger = (await readFile(ledgerFile(join(dir, 'ledger')), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  for (const row of ledger) {
+    assert.ok(row.durationMs > 0);
+    assert.equal(row.outputTokensPerSec, row.outputTokens * 1000 / row.durationMs);
+    assert.equal(stats.models[row.model].avgOutputTokensPerSec, row.outputTokensPerSec);
+  }
+  const expectedMean = (ledger[0].outputTokensPerSec + ledger[1].outputTokensPerSec) / 2;
+  assert.ok(Math.abs(stats.totals.avgOutputTokensPerSec - expectedMean) <= Number.EPSILON * Math.max(1, expectedMean) * 4);
   assert.deepEqual(
     ledger.map((l) => [l.route, l.inputTokens, l.cacheReadTokens, l.cacheWriteTokens, l.outputTokens]),
     [['sol', 100, 800, 0, 30], ['opus', 5, 3000, 200, 42]],
