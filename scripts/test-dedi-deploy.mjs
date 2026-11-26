@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import net from 'node:net';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -271,6 +273,18 @@ test('proxied /health hides internal topology, SSE disables proxy buffering, and
   assert.equal(sseAdapted.headers.get('x-accel-buffering'), 'no');
   assert.ok((await sseAdapted.text()).includes('message_stop'));
 
+  // 4b. Malformed HTTP client traffic must be rejected cleanly by clientError without crashing the process.
+  await new Promise((resolve) => {
+    const sock = net.createConnection({ host: '127.0.0.1', port }, () => {
+      sock.write('NOT_HTTP \r\n\r\n');
+    });
+    sock.on('data', () => {});
+    sock.on('error', () => {});
+    sock.on('close', resolve);
+    sock.setTimeout(1000, () => { sock.destroy(); resolve(); });
+  });
+  assert.equal((await rawGet('/health', { host: `127.0.0.1:${port}` })).status, 200);
+
   // 5. Graceful shutdown drains in-flight request and rejects new requests on reused keep-alive sockets (POSIX).
   if (process.platform !== 'win32') {
     const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 1 });
@@ -353,10 +367,15 @@ test('systemd managed gateway refuses Web restart and deploy templates keep cons
   process.env.GATEWAY_MANAGED_BY = 'systemd';
   await assert.rejects(restartGateway(), (err) => err.statusCode === 409 && /systemctl restart/.test(err.message));
 
-  const [nginx, caddy, webSvc, appJs] = await Promise.all([
+  const [nginx, caddy, gwSvc, webSvc, watchdogSh, watchdogSvc, watchdogTimer, upstreamFetchJs, appJs] = await Promise.all([
     readFile(join(ROOT, 'deploy', 'nginx-slizm-gateway.conf.example'), 'utf8'),
     readFile(join(ROOT, 'deploy', 'Caddyfile.example'), 'utf8'),
+    readFile(join(ROOT, 'deploy', 'slizm-gateway.service'), 'utf8'),
     readFile(join(ROOT, 'deploy', 'slizm-gateway-web.service'), 'utf8'),
+    readFile(join(ROOT, 'deploy', 'slizm-gateway-watchdog.sh'), 'utf8'),
+    readFile(join(ROOT, 'deploy', 'slizm-gateway-watchdog.service'), 'utf8'),
+    readFile(join(ROOT, 'deploy', 'slizm-gateway-watchdog.timer'), 'utf8'),
+    readFile(join(ROOT, 'src', 'upstream-fetch.js'), 'utf8'),
     readFile(join(ROOT, 'src', 'admin', 'public', 'app.js'), 'utf8'),
   ]);
   assert.match(nginx, /server\s+127\.0\.0\.1:4000;/);
@@ -364,7 +383,20 @@ test('systemd managed gateway refuses Web restart and deploy templates keep cons
   assert.match(nginx, /location\s+\^~\s+\/v1\//);
   assert.match(caddy, /path \/health \/v1\/\*/);
   assert.match(caddy, /respond 404/);
+  assert.match(gwSvc, /StartLimitIntervalSec=0/);
+  assert.match(gwSvc, /Restart=always/);
+  assert.match(gwSvc, /OOMScoreAdjust=-500/);
+  assert.match(gwSvc, /MemoryMax=512M/);
+  assert.match(webSvc, /StartLimitIntervalSec=0/);
+  assert.match(webSvc, /Restart=always/);
   assert.match(webSvc, /GATEWAY_MANAGED_BY=systemd/);
+  assert.ok(!watchdogSh.includes('\r\n'), 'watchdog script must keep LF endings');
+  assert.match(watchdogSvc, /slizm-gateway-watchdog\.sh/);
+  assert.match(watchdogTimer, /OnUnitActiveSec=1min/);
+  assert.doesNotMatch(upstreamFetchJs, /\.once\(['"]error['"]/, 'upstream-fetch must use persistent on(error) listeners');
   assert.match(appJs, /connectTimeoutMs:\s*30000/);
   assert.match(appJs, /requestTimeoutMs:\s*600000/);
+  if (process.platform !== 'win32') {
+    await promisify(execFile)('bash', ['-n', join(ROOT, 'deploy', 'slizm-gateway-watchdog.sh')], { timeout: 10_000 });
+  }
 });

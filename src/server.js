@@ -737,6 +737,9 @@ async function routeRequest(req, res) {
   return errorResponse(res, 404, `网关不支持的路由: ${req.method} ${path}`, 'not_found_error');
 }
 const server = http.createServer((req, res) => {
+  // 防止客户端异常断连在 req / res 上触发未监听的 error 事件拖垮整个网关进程
+  req.on('error', () => {});
+  res.on('error', () => {});
   // 请求 ID 一律由网关生成，不回显客户端带来的值：日志前缀统一，也不把任意客户端输入写进响应头
   const requestId = `gw_${randomUUID().slice(0, 8)}`;
   res.requestId = requestId;
@@ -750,6 +753,10 @@ const server = http.createServer((req, res) => {
     // 兜底：处理完响应仍未 end（例如错误处理本身又出错）就断开，不让 Claude Code 一直挂着等
     if (!res.writableEnded) res.destroy();
   });
+});
+server.on('clientError', (err, socket) => {
+  if (err?.code === 'ECONNRESET' || !socket.writable) return;
+  socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
 });
 // 反向代理（Caddy / Nginx）默认上游 keep-alive 通常为 60s，高于此值可避免复用半关闭连接触发偶发 502。
 // 显式关闭 Node 默认 300s requestTimeout，由 headersTimeout、64MB readBody 上限与每 provider requestTimeoutMs 控制超时。

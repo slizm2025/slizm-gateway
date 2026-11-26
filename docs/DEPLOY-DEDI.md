@@ -74,6 +74,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now slizm-gateway-web
 ```
 
+（推荐）开启健康自愈 Watchdog（每分钟探测 `/health`，连续 3 次超时/失败自动重启 `slizm-gateway`，同时尊重手动 `systemctl stop`）：
+```bash
+sudo cp /opt/slizm-gateway/deploy/slizm-gateway-watchdog.{service,timer} /etc/systemd/system/
+# 若路径或端口非默认，修改其中的 ExecStart 与 GATEWAY_HEALTH_URL
+sudo systemctl daemon-reload
+sudo systemctl enable --now slizm-gateway-watchdog.timer
+```
+
 ---
 
 ## 5. 安装并配置 Caddy（自动 HTTPS）

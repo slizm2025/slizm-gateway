@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Slizm Gateway Health Watchdog every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Unit=slizm-gateway-watchdog.service
+
+[Install]
+WantedBy=timers.target

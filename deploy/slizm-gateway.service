@@ -2,6 +2,8 @@
 Description=Slizm Gateway (Unified LLM API Proxy)
 After=network-online.target
 Wants=network-online.target
+# 取消 10s 内失败 5 次即放弃重启的默认上限，防止瞬时抖动后服务永久停摆
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -13,6 +15,7 @@ ExecStart=/usr/bin/node /opt/slizm-gateway/src/server.js
 
 Environment=NODE_ENV=production
 Environment=TZ=Asia/Shanghai
+Environment=NODE_OPTIONS=--max-old-space-size=384
 Environment=GATEWAY_HOST=127.0.0.1
 Environment=GATEWAY_PORT=4000
 # 强制校验至少 24 位随机 clientToken，防止误用示例默认密钥
@@ -22,10 +25,14 @@ Environment=GATEWAY_SHUTDOWN_TIMEOUT_MS=60000
 # 显式指定账本目录（即使使用外部 GATEWAY_CONFIG 也不会关闭用量记录）
 Environment=GATEWAY_USAGE_DIR=/opt/slizm-gateway/logs
 
-Restart=on-failure
+# 任何非预期退出（含退出码 0）均自动拉起，避免服务静默关闭
+Restart=always
 RestartSec=3
 TimeoutStopSec=75
 LimitNOFILE=65536
+MemoryMax=512M
+OOMScoreAdjust=-500
+OOMPolicy=continue
 
 # 默认由 journald 接管日志（用 `sudo journalctl -u slizm-gateway -f` 查看）。
 # 如需在远程 SSH 转发的管理台「请求日志」页实时查看日志，可改用下方两行（需 systemd >= 240 且先 mkdir -p logs）：

@@ -1,0 +1,10 @@
+[Unit]
+Description=Slizm Gateway Health Watchdog
+After=slizm-gateway.service
+
+[Service]
+Type=oneshot
+Environment=GATEWAY_SERVICE=slizm-gateway
+Environment=GATEWAY_HEALTH_URL=http://127.0.0.1:4000/health
+Environment=GATEWAY_WATCHDOG_MAX_FAILURES=3
+ExecStart=/opt/slizm-gateway/deploy/slizm-gateway-watchdog.sh

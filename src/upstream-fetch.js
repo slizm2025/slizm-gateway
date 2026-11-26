@@ -128,8 +128,11 @@ function requestDirect(url, init, keepAlive, connectTimeoutMs) {
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
+    let settled = false;
     // 复用的 keep-alive socket 无法判断请求是否已送达，保守按 response-headers 处理
     let phase = 'response-headers';
+    const settleResolve = (value) => { if (settled) return; settled = true; resolve(value); };
+    const settleReject = (error) => { if (settled) return; settled = true; reject(error); };
     const req = mod.request(url, {
       method: init.method ?? 'GET',
       headers,
@@ -148,11 +151,12 @@ function requestDirect(url, init, keepAlive, connectTimeoutMs) {
       });
       if (isHttps) socket.once('secureConnect', () => { phase = 'response-headers'; stopDeadline(); });
     });
-    req.once('response', (inc) => receiveResponse(inc, init.method, resolve,
-      (error) => reject(wrapNetworkError(error, url, 'response-headers'))));
-    req.once('error', (error) => {
+    req.once('response', (inc) => receiveResponse(inc, init.method, settleResolve,
+      (error) => settleReject(wrapNetworkError(error, url, 'response-headers'))));
+    // 用 on 而非 once：超时/取消销毁连接时可能连续触发多次 error，避免第二次成为未捕获异常拖垮进程
+    req.on('error', (error) => {
       stopDeadline();
-      reject(wrapNetworkError(signal?.aborted ? (signal.reason ?? error) : error, url, phase));
+      settleReject(wrapNetworkError(signal?.aborted ? (signal.reason ?? error) : error, url, phase));
     });
     req.end(init.body);
   });
@@ -166,7 +170,10 @@ function requestViaProxy(proxy, url, init, keepAlive, connectTimeoutMs) {
   if (url.protocol !== 'https:') {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(signal.reason);
+      let settled = false;
       let phase = 'proxy-connect';
+      const settleResolve = (value) => { if (settled) return; settled = true; resolve(value); };
+      const settleReject = (error) => { if (settled) return; settled = true; reject(error); };
       const req = http.request({
         hostname: info.hostname,
         port: info.port,
@@ -184,11 +191,11 @@ function requestViaProxy(proxy, url, init, keepAlive, connectTimeoutMs) {
         if (!socket.connecting) connected();
         else socket.once('connect', connected);
       });
-      req.once('response', (inc) => receiveResponse(inc, init.method, resolve,
-        (error) => reject(wrapNetworkError(error, url, 'response-headers'))));
-      req.once('error', (error) => {
+      req.once('response', (inc) => receiveResponse(inc, init.method, settleResolve,
+        (error) => settleReject(wrapNetworkError(error, url, 'response-headers'))));
+      req.on('error', (error) => {
         stopDeadline();
-        reject(wrapNetworkError(signal?.aborted ? (signal.reason ?? error) : error, url, phase));
+        settleReject(wrapNetworkError(signal?.aborted ? (signal.reason ?? error) : error, url, phase));
       });
       req.end(init.body);
     });
@@ -235,7 +242,7 @@ function requestViaProxy(proxy, url, init, keepAlive, connectTimeoutMs) {
       },
       agent: false,
     });
-    connectReq.once('error', fail);
+    connectReq.on('error', fail);
     connectReq.once('connect', (res, socket) => {
       rawSocket = socket;
       if (res.statusCode !== 200) {

@@ -131,6 +131,8 @@ export function createAdminServer(options = {}) {
   let restartInProgress = false;
 
   const server = http.createServer(async (req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
     try {
     if (!isLoopbackRemote(req.socket.remoteAddress)) {
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });

@@ -2,6 +2,7 @@
 Description=Slizm Gateway Local Web Admin (Loopback Only)
 After=network-online.target slizm-gateway.service
 Wants=slizm-gateway.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -14,15 +15,19 @@ ExecStart=/usr/bin/node /opt/slizm-gateway/src/admin/server.js
 
 Environment=NODE_ENV=production
 Environment=TZ=Asia/Shanghai
+Environment=NODE_OPTIONS=--max-old-space-size=256
 Environment=GATEWAY_HOST=127.0.0.1
 Environment=GATEWAY_PORT=4000
 Environment=GATEWAY_WEB_PORT=48731
 Environment=GATEWAY_USAGE_DIR=/opt/slizm-gateway/logs
 Environment=GATEWAY_MANAGED_BY=systemd
 
-Restart=on-failure
+Restart=always
 RestartSec=3
 TimeoutStopSec=15
+MemoryMax=384M
+OOMScoreAdjust=-200
+OOMPolicy=continue
 
 StandardOutput=journal
 StandardError=journal
