@@ -18,6 +18,7 @@ Environment=GATEWAY_HOST=127.0.0.1
 Environment=GATEWAY_PORT=4000
 Environment=GATEWAY_WEB_PORT=48731
 Environment=GATEWAY_USAGE_DIR=/opt/slizm-gateway/logs
+Environment=GATEWAY_MANAGED_BY=systemd
 
 Restart=on-failure
 RestartSec=3

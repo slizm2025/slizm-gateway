@@ -3766,10 +3766,10 @@
       apiType: "anthropic",
       baseUrl: "https://api.anthropic.com",
       clientProfile: "auto",
-      maxConcurrency: 5,
-      maxAttempts: 3,
-      connectTimeoutMs: 5000,
-      requestTimeoutMs: 60000,
+      maxConcurrency: 3,
+      maxAttempts: 4,
+      connectTimeoutMs: 30000,
+      requestTimeoutMs: 600000,
       requireKey: true,
       hasApiKey: false,
       models: {},
@@ -3965,23 +3965,23 @@
       }, keyPlaceholder);
       row2.appendChild(fKey);
 
-      const fConcurrency = createFormField("最大并发数 (maxConcurrency)", "number", p.maxConcurrency ?? 5, (val) => {
+      const fConcurrency = createFormField("最大并发数 (maxConcurrency)", "number", p.maxConcurrency ?? 3, (val) => {
         p.maxConcurrency = parseInt(val, 10) || 1;
       });
       row2.appendChild(fConcurrency);
 
-      const fAttempts = createFormField("重试次数 (maxAttempts)", "number", p.maxAttempts ?? 3, (val) => {
+      const fAttempts = createFormField("重试次数 (maxAttempts)", "number", p.maxAttempts ?? 4, (val) => {
         p.maxAttempts = parseInt(val, 10) || 1;
       });
       row2.appendChild(fAttempts);
 
-      const fConnTimeout = createFormField("连接超时 (connectTimeoutMs)", "number", p.connectTimeoutMs ?? 5000, (val) => {
-        p.connectTimeoutMs = parseInt(val, 10) || 5000;
+      const fConnTimeout = createFormField("连接超时 (connectTimeoutMs)", "number", p.connectTimeoutMs ?? 30000, (val) => {
+        p.connectTimeoutMs = parseInt(val, 10) || 30000;
       });
       row2.appendChild(fConnTimeout);
 
-      const fReqTimeout = createFormField("请求超时 (requestTimeoutMs)", "number", p.requestTimeoutMs ?? 60000, (val) => {
-        p.requestTimeoutMs = parseInt(val, 10) || 60000;
+      const fReqTimeout = createFormField("请求超时 (requestTimeoutMs)", "number", p.requestTimeoutMs ?? 600000, (val) => {
+        p.requestTimeoutMs = parseInt(val, 10) || 600000;
       });
       row2.appendChild(fReqTimeout);
 

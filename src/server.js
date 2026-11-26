@@ -153,6 +153,7 @@ function readBody(req, limit = 64 * 1024 * 1024) {
       size += chunk.length;
       if (size > limit) {
         failed = true; chunks = [];
+        req.pause();
         reject(Object.assign(new Error(`请求体超过 ${limit} 字节上限`), { status: 413 }));
       } else chunks.push(chunk);
     });
@@ -677,6 +678,12 @@ async function countTokens(req, res, body, rawBody) {
 async function routeRequest(req, res) {
   const cfg = currentConfig();
   const path = new URL(req.url, 'http://localhost').pathname.replace(/\/+$/, '') || '/';
+  if (shuttingDown) {
+    if (req.method === 'GET' && path === '/health') {
+      return json(res, 503, { status: 'shutting_down' }, { connection: 'close', 'retry-after': '2' });
+    }
+    return errorResponse(res, 503, '网关正在优雅关闭，请稍后重试', 'overloaded_error', { connection: 'close', 'retry-after': '2' });
+  }
   if (req.method === 'GET' && (path === '/health' || path === '/')) {
     const detailed = checkClientAuth(req) || isDirectLocalRequest(req);
     if (!detailed) {
@@ -745,8 +752,10 @@ const server = http.createServer((req, res) => {
   });
 });
 // 反向代理（Caddy / Nginx）默认上游 keep-alive 通常为 60s，高于此值可避免复用半关闭连接触发偶发 502。
+// 显式关闭 Node 默认 300s requestTimeout，由 headersTimeout、64MB readBody 上限与每 provider requestTimeoutMs 控制超时。
 server.keepAliveTimeout = 65_000;
 server.headersTimeout = 70_000;
+server.requestTimeout = 0;
 
 server.listen(cfg.server.port, cfg.server.host, () => {
   stopPricingWatch = runtimePricing.startWatching();

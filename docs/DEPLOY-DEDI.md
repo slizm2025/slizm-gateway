@@ -113,7 +113,11 @@ curl -s -H "Authorization: Bearer <你的clientToken>" https://gw.example.com/v1
 ssh -N -L 48731:127.0.0.1:48731 user@your-dedi-ip
 ```
 
-然后在本地浏览器打开 `http://127.0.0.1:48731/` 即可安全查看运行概览、用量趋势与修改 `providers.json`（保存后会自动热更新网关配置，无需重启）。
+然后在本地浏览器打开 `http://127.0.0.1:48731/` 即可安全查看运行概览、用量趋势与修改 `providers.json`（保存后会自动热更新网关配置，无需重启；在服务器上编辑 `.env` 后触发热更新也会生效）。
+
+- **重启说明**：在 `systemd` 托管下，网关进程应通过 `sudo systemctl restart slizm-gateway` 重启（管理台已设置 `GATEWAY_MANAGED_BY=systemd` 避免与 `gw.js` 冲突）。
+- **请求日志说明**：默认 `StandardOutput=journal` 使用 `journald` 管理日志，用 `sudo journalctl -u slizm-gateway -f` 查看；如需在远程管理台「请求日志」页直接看日志，可取消 `slizm-gateway.service` 中 `StandardOutput=append:...` 注释。
+- **子代理编排注意**：远程管理台的「子代理编排」编辑的是服务器本机的 `~/.claude` / `~/.codex`，而非你当前笔记本上的客户端目录。
 
 ---
 

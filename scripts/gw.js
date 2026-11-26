@@ -253,6 +253,34 @@ function cleanupLogFiles(args) {
     } catch {}
   }
 
+  const backupRoot = join(LOGS, 'config-backups');
+  if (existsSync(backupRoot)) {
+    const byBackupGroup = new Map();
+    const walkBackups = (dir, prefix) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walkBackups(full, `${prefix}${entry.name}/`);
+          continue;
+        }
+        if (!entry.isFile() || !entry.name.endsWith('.bak')) continue;
+        const m = /^(.+?)\.\d{4}-\d{2}-\d{2}T[^.]*(?:\.[a-f0-9]+)?\.bak$/i.exec(entry.name);
+        if (!m) continue;
+        try {
+          const info = statSync(full);
+          const groupKey = `${prefix}${m[1]}`;
+          if (!byBackupGroup.has(groupKey)) byBackupGroup.set(groupKey, []);
+          byBackupGroup.get(groupKey).push({ name: `config-backups/${prefix}${entry.name}`, path: full, mtimeMs: info.mtimeMs, kind: '配置备份' });
+        } catch {}
+      }
+    };
+    walkBackups(backupRoot, '');
+    for (const files of byBackupGroup.values()) {
+      files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      candidates.push(...files.slice(options.keep).filter((file) => file.mtimeMs < cutoff));
+    }
+  }
+
   let removedBytes = 0;
   for (const file of candidates) {
     const size = (() => { try { return statSync(file.path).size; } catch { return 0; } })();

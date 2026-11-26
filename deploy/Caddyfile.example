@@ -14,17 +14,25 @@ gw.example.com {
 		-Server
 	}
 
-	reverse_proxy 127.0.0.1:4000 {
-		# 立即刷新 SSE 流式分片，避免反代缓冲导致首字延迟
-		flush_interval -1
+	# 仅放行 /health 与 /v1/*，公网扫描器访问其他路径在反代层直接返回 404
+	@api path /health /v1/*
+	handle @api {
+		reverse_proxy 127.0.0.1:4000 {
+			# 立即刷新 SSE 流式分片，避免反代缓冲导致首字延迟
+			flush_interval -1
 
-		transport http {
-			dial_timeout 10s
-			# 略大于网关默认 requestTimeoutMs（600s），避免长推理/思考流被反代提前切断
-			response_header_timeout 11m
-			read_timeout 12m
-			write_timeout 12m
-			keepalive 60s
+			transport http {
+				dial_timeout 10s
+				# 略大于网关默认 requestTimeoutMs（600s），避免长推理/思考流被反代提前切断
+				response_header_timeout 11m
+				read_timeout 12m
+				write_timeout 12m
+				keepalive 60s
+			}
 		}
+	}
+
+	handle {
+		respond 404
 	}
 }

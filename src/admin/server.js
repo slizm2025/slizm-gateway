@@ -1,7 +1,7 @@
 // Local Web Admin Backend for Slizm Gateway
 import http from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, renameSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, renameSync, chmodSync, statSync, truncateSync } from 'node:fs';
 import { join, resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOT, env, loadConfig, redact } from '../config.js';
@@ -374,8 +374,8 @@ export function createAdminServer(options = {}) {
           const cleared = [];
           for (const file of files) {
             if (!existsSync(file)) continue;
-            const bytes = readFileSync(file).length;
-            writeFileSync(file, '');
+            const bytes = statSync(file).size;
+            truncateSync(file, 0);
             cleared.push({ file: basename(file), bytes });
           }
           return jsonResponse(res, 200, { ok: true, cleared });

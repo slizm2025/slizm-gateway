@@ -20,7 +20,11 @@ function loadDotEnv(path) {
   }
   return out;
 }
-const dotenv = loadDotEnv(join(ROOT, '.env'));
+let dotenv = loadDotEnv(join(ROOT, '.env'));
+export function reloadDotEnv() {
+  dotenv = loadDotEnv(join(ROOT, '.env'));
+  return dotenv;
+}
 export function env(name, fallback = undefined) {
   const value = process.env[name] ?? dotenv[name];
   return value === undefined || value === '' ? fallback : value;
@@ -94,6 +98,7 @@ export function isWeakClientToken(token) {
 }
 
 export function loadConfig(opts = {}) {
+  reloadDotEnv();
   missingSecrets.length = 0;
   const cfg = record(opts.raw ?? readJson(opts.configPath ?? env('GATEWAY_CONFIG', join(ROOT, 'providers.json'))), '配置');
   const host = env('GATEWAY_HOST', '127.0.0.1');

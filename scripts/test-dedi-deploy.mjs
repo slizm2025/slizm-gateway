@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,7 @@ import { loadConfig, isWeakClientToken } from '../src/config.js';
 import { buildHeaders } from '../src/providers/anthropic.js';
 import { buildOpenAIHeaders, buildResponsesHeaders } from '../src/providers/openai.js';
 import { hasProxyForwardingHeaders } from '../src/providers/client-headers.js';
+import { restartGateway } from '../src/admin/lifecycle.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const STRONG_TOKEN = 'sk-dedi-strong-token-0123456789abcdef';
@@ -270,8 +271,33 @@ test('proxied /health hides internal topology, SSE disables proxy buffering, and
   assert.equal(sseAdapted.headers.get('x-accel-buffering'), 'no');
   assert.ok((await sseAdapted.text()).includes('message_stop'));
 
-  // 5. Graceful shutdown drains in-flight request on POSIX (Windows SIGTERM terminates immediately).
+  // 5. Graceful shutdown drains in-flight request and rejects new requests on reused keep-alive sockets (POSIX).
   if (process.platform !== 'win32') {
+    const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    t.after(() => keepAliveAgent.destroy());
+    const probeKeepAlive = (path, method = 'GET', body = null) => new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        path,
+        method,
+        agent: keepAliveAgent,
+        headers: {
+          authorization: `Bearer ${STRONG_TOKEN}`,
+          ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}),
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+      });
+      req.on('error', reject);
+      if (body) req.write(body);
+      req.end();
+    });
+    // Prime a keep-alive socket and hold an in-flight request.
+    assert.equal((await probeKeepAlive('/health')).status, 200);
+
     const inflight = fetch(`${base}/v1/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${STRONG_TOKEN}` },
@@ -283,6 +309,15 @@ test('proxied /health hides internal topology, SSE disables proxy buffering, and
     child.kill('SIGTERM');
     await new Promise((r) => setTimeout(r, 150));
     assert.equal(child.exitCode, null, 'gateway should wait for in-flight request before exiting');
+
+    // A request arriving during shutdown must get 503 + Connection: close instead of extending shutdown.
+    const shuttingHealth = await probeKeepAlive('/health').catch(() => null);
+    if (shuttingHealth) {
+      assert.equal(shuttingHealth.status, 503);
+      assert.equal(shuttingHealth.headers.connection, 'close');
+      assert.equal(shuttingHealth.headers['retry-after'], '2');
+    }
+
     releaseHold();
     const drainRes = await inflight;
     assert.equal(drainRes.status, 200);
@@ -290,4 +325,46 @@ test('proxied /health hides internal topology, SSE disables proxy buffering, and
     const [code] = await exited;
     assert.equal(code, 0);
   }
+});
+
+test('systemd managed gateway refuses Web restart and deploy templates keep consistent ports/paths', async (t) => {
+  const saved = {
+    GATEWAY_MANAGED_BY: process.env.GATEWAY_MANAGED_BY,
+    GATEWAY_CONFIG: process.env.GATEWAY_CONFIG,
+    GATEWAY_PORT: process.env.GATEWAY_PORT,
+  };
+  const dir = await mkdtemp(join(tmpdir(), 'gw-systemd-guard-'));
+  const configPath = join(dir, 'providers.json');
+  await writeFile(configPath, JSON.stringify({
+    clientToken: STRONG_TOKEN,
+    providers: [{ name: 'p', apiType: 'anthropic', baseUrl: 'https://example.invalid', apiKey: 'k' }],
+    routes: {},
+  }));
+  t.after(async () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  process.env.GATEWAY_CONFIG = configPath;
+  process.env.GATEWAY_PORT = '1';
+  process.env.GATEWAY_MANAGED_BY = 'systemd';
+  await assert.rejects(restartGateway(), (err) => err.statusCode === 409 && /systemctl restart/.test(err.message));
+
+  const [nginx, caddy, webSvc, appJs] = await Promise.all([
+    readFile(join(ROOT, 'deploy', 'nginx-slizm-gateway.conf.example'), 'utf8'),
+    readFile(join(ROOT, 'deploy', 'Caddyfile.example'), 'utf8'),
+    readFile(join(ROOT, 'deploy', 'slizm-gateway-web.service'), 'utf8'),
+    readFile(join(ROOT, 'src', 'admin', 'public', 'app.js'), 'utf8'),
+  ]);
+  assert.match(nginx, /server\s+127\.0\.0\.1:4000;/);
+  assert.match(nginx, /location\s+=\s+\/health/);
+  assert.match(nginx, /location\s+\^~\s+\/v1\//);
+  assert.match(caddy, /path \/health \/v1\/\*/);
+  assert.match(caddy, /respond 404/);
+  assert.match(webSvc, /GATEWAY_MANAGED_BY=systemd/);
+  assert.match(appJs, /connectTimeoutMs:\s*30000/);
+  assert.match(appJs, /requestTimeoutMs:\s*600000/);
 });

@@ -27,6 +27,10 @@ RestartSec=3
 TimeoutStopSec=75
 LimitNOFILE=65536
 
+# 默认由 journald 接管日志（用 `sudo journalctl -u slizm-gateway -f` 查看）。
+# 如需在远程 SSH 转发的管理台「请求日志」页实时查看日志，可改用下方两行（需 systemd >= 240 且先 mkdir -p logs）：
+# StandardOutput=append:/opt/slizm-gateway/logs/gateway.out.log
+# StandardError=append:/opt/slizm-gateway/logs/gateway.err.log
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=slizm-gateway

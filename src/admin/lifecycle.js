@@ -253,6 +253,17 @@ export async function restartGateway() {
     if (info?.activeRequests > 0) {
       throw Object.assign(new Error(`仍有 ${info.activeRequests} 个请求处理中，请稍后重启。`), { statusCode: 409 });
     }
+    const managedBy = String(env('GATEWAY_MANAGED_BY', '')).trim().toLowerCase();
+    if (managedBy === 'systemd') {
+      throw Object.assign(new Error('网关由 systemd 托管，请在服务器执行 sudo systemctl restart slizm-gateway（配置保存后已自动热更新，通常无需重启）。'), { statusCode: 409 });
+    }
+    if (info?.pid) {
+      const pidFile = join(ROOT, 'logs', 'gateway.pid');
+      const recordedPid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8').trim()) : null;
+      if (recordedPid !== info.pid) {
+        throw Object.assign(new Error(`当前网关 (pid ${info.pid}) 并非由 gw.js 托管（可能由 systemd / pm2 或前台进程启动），请通过对应进程管理器重启。`), { statusCode: 409 });
+      }
+    }
     await new Promise((resolve, reject) => {
       execFile(process.execPath, [join(ROOT, 'scripts', 'gw.js'), 'restart'], {
         cwd: ROOT, windowsHide: true, timeout: 30000, maxBuffer: 256 * 1024,
