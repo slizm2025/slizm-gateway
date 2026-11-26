@@ -1,7 +1,7 @@
 import { spawn, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, posix, resolve } from 'node:path';
 import { ROOT, env, loadConfig, redact } from '../config.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -69,12 +69,19 @@ async function resolveLiveWeb() {
 
 // 应用窗口：Chrome/Edge 的 --app 模式不显示地址栏和标签页，管理页看起来就是一个独立应用，
 // 而不是浏览器里多出来的一个标签。找不到可用浏览器时返回 null，由调用方退回系统默认浏览器。
-const APP_BROWSERS = [
+const WIN_APP_BROWSERS = [
   ['ProgramFiles', 'Google/Chrome/Application/chrome.exe'],
   ['ProgramFiles(x86)', 'Google/Chrome/Application/chrome.exe'],
   ['LOCALAPPDATA', 'Google/Chrome/Application/chrome.exe'],
   ['ProgramFiles(x86)', 'Microsoft/Edge/Application/msedge.exe'],
   ['ProgramFiles', 'Microsoft/Edge/Application/msedge.exe'],
+];
+
+const MAC_APP_BROWSERS = [
+  'Google Chrome.app/Contents/MacOS/Google Chrome',
+  'Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  'Brave Browser.app/Contents/MacOS/Brave Browser',
+  'Chromium.app/Contents/MacOS/Chromium',
 ];
 
 export function resolveAppBrowser(url, {
@@ -83,13 +90,29 @@ export function resolveAppBrowser(url, {
   envVars = process.env,
   fileExists = existsSync,
 } = {}) {
-  if (platform !== 'win32' || mode !== 'app') return null;
-  for (const [base, relative] of APP_BROWSERS) {
-    const baseDir = envVars[base];
-    if (!baseDir) continue;
-    const command = join(baseDir, relative);
-    if (!fileExists(command)) continue;
-    return { command, args: [`--app=${url}`, '--no-first-run', '--no-default-browser-check'] };
+  if (mode !== 'app') return null;
+  const appArgs = [`--app=${url}`, '--no-first-run', '--no-default-browser-check'];
+  if (platform === 'win32') {
+    for (const [base, relative] of WIN_APP_BROWSERS) {
+      const baseDir = envVars[base];
+      if (!baseDir) continue;
+      const command = join(baseDir, relative);
+      if (!fileExists(command)) continue;
+      return { command, args: appArgs };
+    }
+    return null;
+  }
+  if (platform === 'darwin') {
+    const appDirs = ['/Applications'];
+    if (envVars.HOME) appDirs.push(posix.join(envVars.HOME, 'Applications'));
+    for (const relative of MAC_APP_BROWSERS) {
+      for (const appDir of appDirs) {
+        const command = posix.join(appDir, relative);
+        if (!fileExists(command)) continue;
+        return { command, args: appArgs };
+      }
+    }
+    return null;
   }
   return null;
 }

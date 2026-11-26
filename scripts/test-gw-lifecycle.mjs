@@ -276,7 +276,7 @@ test('stale or missing web-session.json still recognizes, reuses, and stops the 
   assertStopped(stopped, 'web');
 });
 
-test('autostart on, status and off manage an ASCII background VBS script cleanly', { timeout: 90_000 }, async (t) => {
+test('autostart on, status and off manage the platform background startup entry cleanly', { timeout: 90_000 }, async (t) => {
   const fixture = await createFixture(t);
   const autostartDir = join(fixture.dir, 'startup');
   fixture.env = { ...fixture.env, GATEWAY_AUTOSTART_DIR: autostartDir };
@@ -285,12 +285,22 @@ test('autostart on, status and off manage an ASCII background VBS script cleanly
   assert.match(before.stdout, /未开启/);
 
   await fixture.run(['autostart', 'on']);
-  const vbsPath = join(autostartDir, 'SlizmGateway.vbs');
-  const raw = await readFile(vbsPath);
-  assert.ok(![...raw].some((byte) => byte > 0x7f), 'autostart VBS must stay ASCII-only');
-  const text = raw.toString('utf8');
-  assert.match(text, /up --no-open/);
-  assert.match(text, /, 0, True/);
+  if (process.platform === 'darwin') {
+    const plistPath = join(autostartDir, 'com.slizm.gateway.plist');
+    const text = await readFile(plistPath, 'utf8');
+    assert.match(text, /<string>com\.slizm\.gateway<\/string>/);
+    assert.match(text, /<string>up<\/string>\s*<string>--no-open<\/string>/);
+    assert.match(text, /<key>RunAtLoad<\/key>\s*<true\/>/);
+    assert.match(text, /<key>AbandonProcessGroup<\/key>\s*<true\/>/);
+    await execFileAsync('plutil', ['-lint', plistPath], { timeout: 10_000 });
+  } else {
+    const vbsPath = join(autostartDir, 'SlizmGateway.vbs');
+    const raw = await readFile(vbsPath);
+    assert.ok(![...raw].some((byte) => byte > 0x7f), 'autostart VBS must stay ASCII-only');
+    const text = raw.toString('utf8');
+    assert.match(text, /up --no-open/);
+    assert.match(text, /, 0, True/);
+  }
 
   const enabled = await fixture.run(['autostart', 'status']);
   assert.match(enabled.stdout, /已开启/);

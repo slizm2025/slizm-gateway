@@ -1,0 +1,5 @@
+# Preserve Windows-required CRLF and macOS/POSIX LF across clones on any OS.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+*.command text eol=lf

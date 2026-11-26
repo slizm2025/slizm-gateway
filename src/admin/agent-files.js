@@ -1,8 +1,28 @@
-import { existsSync, lstatSync, mkdirSync, copyFileSync, writeFileSync, renameSync, unlinkSync, chmodSync, statSync, linkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, copyFileSync, writeFileSync, renameSync, unlinkSync, chmodSync, statSync, linkSync, readlinkSync } from 'node:fs';
 import { resolve, join, basename, dirname, sep, parse } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const MAX_FILE_SIZE = 256 * 1024;
+
+// macOS ships with top-level system symlinks (/var -> private/var, /tmp -> private/tmp,
+// /etc -> private/etc). os.tmpdir() resolves under /var/folders, so ancestor traversal must
+// allow only these verified OS symlinks while still rejecting any user-created symlinks.
+const MACOS_SYSTEM_SYMLINKS = new Map([
+  ['/var', 'private/var'],
+  ['/tmp', 'private/tmp'],
+  ['/etc', 'private/etc'],
+]);
+
+function isMacOsSystemSymlink(curr) {
+  if (process.platform !== 'darwin') return false;
+  const expected = MACOS_SYSTEM_SYMLINKS.get(curr);
+  if (!expected) return false;
+  try {
+    return readlinkSync(curr).replace(/^\/+/, '') === expected;
+  } catch {
+    return false;
+  }
+}
 
 const WINDOWS_RESERVED = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
@@ -47,7 +67,7 @@ export function assertNoSymlinksInAncestors(targetPath) {
   while (curr && curr !== root) {
     try {
       const st = lstatSync(curr);
-      if (st.isSymbolicLink()) {
+      if (st.isSymbolicLink() && !isMacOsSystemSymlink(curr)) {
         throw fail(`路径包含符号链接或连接点: ${curr}`, 400);
       }
     } catch (e) {

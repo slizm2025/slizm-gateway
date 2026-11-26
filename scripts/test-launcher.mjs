@@ -156,10 +156,26 @@ test('管理页优先用 Chrome/Edge 的 --app 应用窗口打开', () => {
     edge,
     '没有 Chrome 时应退回 Edge',
   );
-  // 两个浏览器都找不到、显式禁用应用模式、非 Windows：都返回 null，由 openBrowser 退回默认浏览器。
+  // 两个浏览器都找不到、显式禁用应用模式、Linux：都返回 null，由 openBrowser 退回默认浏览器。
   assert.equal(resolveAppBrowser(url, { platform: 'win32', envVars, fileExists: () => false }), null);
   assert.equal(resolveAppBrowser(url, { platform: 'win32', mode: 'default', envVars, fileExists: () => true }), null);
   assert.equal(resolveAppBrowser(url, { platform: 'linux', envVars, fileExists: () => true }), null);
+
+  // macOS 支持 Chrome / Edge / Brave / Chromium 的 --app 应用窗口（优先 /Applications，再查 ~/Applications）。
+  const macEnv = { HOME: '/Users/me' };
+  const macChrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  const macUserEdge = '/Users/me/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge';
+  assert.deepEqual(
+    resolveAppBrowser(url, { platform: 'darwin', envVars: macEnv, fileExists: (path) => path === macChrome }),
+    { command: macChrome, args },
+  );
+  assert.equal(
+    resolveAppBrowser(url, { platform: 'darwin', envVars: macEnv, fileExists: (path) => path === macUserEdge }).command,
+    macUserEdge,
+    'macOS 未装 Chrome 时应退回用户目录 Edge',
+  );
+  assert.equal(resolveAppBrowser(url, { platform: 'darwin', envVars: macEnv, fileExists: () => false }), null);
+  assert.equal(resolveAppBrowser(url, { platform: 'darwin', mode: 'default', envVars: macEnv, fileExists: () => true }), null);
 });
 
 test('control-panel.ps1 保持 Windows PowerShell 5.1 能读的编码', async () => {
@@ -262,4 +278,23 @@ test('open.cmd 与 open.vbs 保持 ASCII 并无黑框调用 gw.js open', async (
   assert.match(vbsText, /"scripts\\gw\.js"/);
   assert.match(vbsText, / open > /);
   assert.match(vbsText, /, 0,\s*True\)/);
+});
+
+test('macOS .command 启动器使用 LF 行尾并调用正确的 gw.js 子命令', async () => {
+  const launchers = [
+    ['start.command', 'up'],
+    ['open.command', 'open'],
+    ['stop.command', 'down'],
+    ['status.command', 'status'],
+  ];
+  for (const [file, verb] of launchers) {
+    const filePath = join(root, file);
+    const text = await readFile(filePath, 'utf8');
+    assert.ok(text.startsWith('#!/usr/bin/env bash\n'), `${file} 应以 bash shebang + LF 开头`);
+    assert.ok(!text.includes('\r\n'), `${file} 应保持 LF 行尾`);
+    assert.match(text, new RegExp(`scripts/gw\\.js"\\s+${verb}\\b`), `${file} 应调用 gw.js ${verb}`);
+    if (!windows) {
+      await execFileAsync('bash', ['-n', filePath], { timeout: 10_000 });
+    }
+  }
 });

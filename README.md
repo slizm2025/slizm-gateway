@@ -34,7 +34,7 @@ cp providers.example.json providers.json
 2. 编辑 `providers.json`：配置每个 provider 的 `baseUrl`、`apiType`、模型映射和 `routes`。
 3. 把 `clientToken` 改成仅供本机使用的随机值。Claude Code 配置中的 `ANTHROPIC_AUTH_TOKEN` 必须与它完全相同。
 4. 先运行 `npm test`。该命令仅使用本地模拟上游，不会产生模型费用。
-5. 双击 `start.vbs` 一键启动：只留下一个管理页应用窗口，没有常驻的命令行黑框；也可以执行 `npm run up`。
+5. 一键启动：Windows 双击 `start.vbs`，macOS 双击 `start.command`；也可以在命令行执行 `npm run up`。
 
 让 Claude Code 使用网关时，在其 `settings.json` 的 `env` 中至少配置：
 
@@ -78,20 +78,20 @@ node scripts/gw.js status   # 查看 PID、transport 和源码更新提示
 
 ## 本地管理 Web
 
-Windows 下双击 `start.vbs` 即可。它由 wscript 托管，不会创建控制台窗口：先在后台隐藏执行 `gw.js up` 把网关与管理 Web 拉起，再用 Chrome / Edge 的应用模式打开管理页，桌面上只留下这一个应用窗口（没有地址栏和标签栏，也没有命令行黑框）。`start.cmd` 保留为兼容入口，效果相同。启动输出写在 `logs/launcher.log`；启动失败会弹窗提示，并附上日志尾部。
+Windows 下双击 `start.vbs` 即可（macOS 下双击 `start.command`，关闭与查看状态分别提供 `open.command` / `stop.command` / `status.command`）。Windows 入口由 wscript 托管，不会创建控制台窗口：先在后台隐藏执行 `gw.js up` 把网关与管理 Web 拉起，再用 Chrome / Edge 的应用模式打开管理页，桌面上只留下这一个应用窗口（没有地址栏和标签栏，也没有命令行黑框）。`start.cmd` 保留为兼容入口，效果相同。启动输出写在 `logs/launcher.log`；启动失败会提示并附上日志位置或尾部。
 
 ```powershell
 npm run up                  # 命令行一键启动，并以应用窗口打开管理页
 npm run down                # 命令行停止网关和 Web
-npm run open                # 随时打开（必要时启动）管理 Web（也可双击 open.cmd / open.vbs）
-npm run autostart -- on     # 开启 Windows 登录后台静默自启（网关 + Web，不弹黑框与浏览器）
+npm run open                # 随时打开（必要时启动）管理 Web（也可双击 open.cmd / open.vbs / open.command）
+npm run autostart -- on     # 开启登录后台静默自启（Windows Startup / macOS LaunchAgent）
 npm run autostart -- status # 查看开机自启状态
 npm run autostart -- off    # 关闭开机自启
-npm run panel               # 可选：打开 WinForms 控制面板，不自动启动服务
-npm run panel:start         # 可选：打开控制面板并自动启动缺失的服务
+npm run panel               # 可选（仅 Windows）：打开 WinForms 控制面板，不自动启动服务
+npm run panel:start         # 可选（仅 Windows）：打开控制面板并自动启动缺失的服务
 ```
 
-应用窗口按 Chrome → Edge 顺序查找，以 `--app=<管理页地址>` 打开；想退回系统默认浏览器（普通标签页）时设置 `GATEWAY_WEB_BROWSER=default`。关闭应用窗口或浏览器标签页不会停止后台服务；可随时重新打开 `http://127.0.0.1:48731/` 或双击 `open.cmd` / `start.vbs` 查看，会话会自动续期与重连。
+应用窗口在 Windows（Chrome → Edge）与 macOS（Chrome → Edge → Brave → Chromium）下以 `--app=<管理页地址>` 打开；找不到对应浏览器或想退回系统默认浏览器（普通标签页）时设置 `GATEWAY_WEB_BROWSER=default`。关闭应用窗口或浏览器标签页不会停止后台服务；可随时重新打开 `http://127.0.0.1:48731/` 或双击 `open.cmd` / `start.vbs` / `open.command` 查看，会话会自动续期与重连。
 
 `npm run panel` 打开的是旧的 WinForms 控制面板（PID、在途请求、运行时间、启停按钮），只作为可选工具保留。它不再是启动入口：Windows 11 默认用 Windows Terminal 承载控制台进程，`-WindowStyle Hidden` 不生效，会留下一个常驻黑框，这正是新入口绕开它的原因。面板中源码比运行进程新时重启按钮会变橙色；有在途请求时停止和重启会暂时禁用，等待请求结束后自动恢复。关闭面板不会停止后台服务。
 
@@ -100,7 +100,7 @@ node scripts/gw.js up                  # 一键启动网关和 Web
 node scripts/gw.js up --no-open        # 后台静默启动网关和 Web，不打开浏览器
 node scripts/gw.js down                # 停止网关和 Web
 node scripts/gw.js open                # 随时打开（必要时启动）管理 Web
-node scripts/gw.js autostart on|off|status  # 管理 Windows 开机后台自启
+node scripts/gw.js autostart on|off|status  # 管理开机后台自启（Windows / macOS）
 node scripts/gw.js start               # 仅启动网关，同时确保独立管理 Web 存在
 node scripts/gw.js web                 # 打开浏览器并自动建立本地会话
 node scripts/gw.js web --no-open       # 仅启动 Web，不打开浏览器

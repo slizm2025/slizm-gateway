@@ -297,7 +297,10 @@ async function cmdStart({ manageWeb = true, strictWeb = false } = {}) {
     console.log(
       paint(C.red, `端口 ${PORT} 已被占用，但不是本管理器启动的进程。`),
     );
-    console.log(paint(C.dim, `  先找出占用者: netstat -ano | findstr :${PORT}`));
+    const portLookup = process.platform === 'win32'
+      ? `netstat -ano | findstr :${PORT}`
+      : `lsof -nP -iTCP:${PORT} -sTCP:LISTEN`;
+    console.log(paint(C.dim, `  先找出占用者: ${portLookup}`));
     process.exitCode = 1;
     return;
   }
@@ -476,7 +479,10 @@ async function cmdStop() {
       console.log(
         paint(C.yellow, `没有记录在案的 pid，但端口 ${PORT} 仍在监听（可能是别的方式启动的）。`),
       );
-      console.log(paint(C.dim, `  netstat -ano | findstr :${PORT}  然后 taskkill /PID <pid> /F`));
+      const stopLookup = process.platform === 'win32'
+        ? `netstat -ano | findstr :${PORT}  然后 taskkill /PID <pid> /F`
+        : `lsof -nP -iTCP:${PORT} -sTCP:LISTEN  然后 kill <pid>`;
+      console.log(paint(C.dim, `  ${stopLookup}`));
       return;
     }
     console.log(paint(C.dim, '网关本来就没在运行。'));
@@ -1053,16 +1059,33 @@ async function cmdHealth() {
   console.log(JSON.stringify(info, null, 2));
 }
 
-function resolveAutostartDir() {
+const MACOS_LAUNCH_AGENT_LABEL = 'com.slizm.gateway';
+
+function resolveAutostartTarget() {
   const override = env('GATEWAY_AUTOSTART_DIR');
-  if (override) return resolve(override);
-  if (process.platform !== 'win32') return null;
-  const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
-  return join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+  if (process.platform === 'darwin') {
+    const dir = override ? resolve(override) : join(homedir(), 'Library', 'LaunchAgents');
+    return { kind: 'darwin-launchd', dir, filePath: join(dir, `${MACOS_LAUNCH_AGENT_LABEL}.plist`) };
+  }
+  if (process.platform === 'win32' || override) {
+    const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+    const dir = override ? resolve(override) : join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+    return { kind: 'win32-vbs', dir, filePath: join(dir, 'SlizmGateway.vbs') };
+  }
+  return null;
 }
 
 function vbsEscape(value) {
   return String(value).replace(/"/g, '""');
+}
+
+function xmlEscape(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 function buildAutostartVbs(rootDir, nodePath) {
@@ -1089,6 +1112,53 @@ function buildAutostartVbs(rootDir, nodePath) {
   ].join('\r\n');
 }
 
+function buildAutostartPlist(rootDir, nodePath) {
+  const gwScript = join(rootDir, 'scripts', 'gw.js');
+  const logPath = join(rootDir, 'logs', 'autostart.log');
+  const pathParts = [...new Set([
+    dirname(nodePath),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ].filter(Boolean))];
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '  <key>Label</key>',
+    `  <string>${xmlEscape(MACOS_LAUNCH_AGENT_LABEL)}</string>`,
+    '  <key>ProgramArguments</key>',
+    '  <array>',
+    `    <string>${xmlEscape(nodePath)}</string>`,
+    `    <string>${xmlEscape(gwScript)}</string>`,
+    '    <string>up</string>',
+    '    <string>--no-open</string>',
+    '  </array>',
+    '  <key>WorkingDirectory</key>',
+    `  <string>${xmlEscape(rootDir)}</string>`,
+    '  <key>EnvironmentVariables</key>',
+    '  <dict>',
+    '    <key>PATH</key>',
+    `    <string>${xmlEscape(pathParts.join(':'))}</string>`,
+    '  </dict>',
+    '  <key>RunAtLoad</key>',
+    '  <true/>',
+    '  <key>AbandonProcessGroup</key>',
+    '  <true/>',
+    '  <key>StandardOutPath</key>',
+    `  <string>${xmlEscape(logPath)}</string>`,
+    '  <key>StandardErrorPath</key>',
+    `  <string>${xmlEscape(logPath)}</string>`,
+    '</dict>',
+    '</plist>',
+    '',
+  ].join('\n');
+}
+
 async function cmdAutostart() {
   const args = process.argv.slice(3);
   const action = (args[0] ?? 'status').toLowerCase();
@@ -1097,30 +1167,37 @@ async function cmdAutostart() {
     process.exitCode = 1;
     return;
   }
-  const dir = resolveAutostartDir();
-  if (!dir) {
-    console.error('当前平台暂不支持 Windows 启动目录自启（可配合系统计划任务或 systemd 执行 `node scripts/gw.js up --no-open`）。');
+  const target = resolveAutostartTarget();
+  if (!target) {
+    console.error('当前平台暂不支持内置开机自启（可配合系统计划任务或 systemd 执行 `node scripts/gw.js up --no-open`）。');
     process.exitCode = 1;
     return;
   }
-  const filePath = join(dir, 'SlizmGateway.vbs');
+  const { kind, dir, filePath } = target;
+  const label = kind === 'darwin-launchd' ? 'LaunchAgent 配置' : '启动脚本';
   if (action === 'status') {
     const enabled = existsSync(filePath);
     const content = enabled ? readFileSync(filePath, 'utf8') : '';
-    const matchesRoot = enabled && content.includes(`root = "${vbsEscape(ROOT)}"`);
+    const expectedMarker = kind === 'darwin-launchd'
+      ? `<string>${xmlEscape(ROOT)}</string>`
+      : `root = "${vbsEscape(ROOT)}"`;
+    const matchesRoot = enabled && content.includes(expectedMarker);
     console.log(`  开机自启: ${enabled ? paint(C.green, '已开启') : paint(C.dim, '未开启')}`);
-    console.log(`  启动脚本: ${filePath}`);
+    console.log(`  ${label}: ${filePath}`);
     if (enabled && !matchesRoot) {
-      console.log(paint(C.yellow, '  ⚠ 启动脚本指向其他目录，建议重新执行 `node scripts/gw.js autostart on` 更新。'));
+      console.log(paint(C.yellow, `  ⚠ ${label}指向其他目录，建议重新执行 \`node scripts/gw.js autostart on\` 更新。`));
     }
     return;
   }
   if (action === 'on') {
     mkdirSync(dir, { recursive: true });
-    const script = buildAutostartVbs(ROOT, process.execPath);
-    atomicWrite(filePath, script);
-    console.log(paint(C.green, '✓ 已开启开机后台自启（登录后静默启动网关与管理 Web，不弹黑框与浏览器）'));
-    console.log(paint(C.dim, `  启动脚本: ${filePath}`));
+    mkdirSync(LOGS, { recursive: true });
+    const content = kind === 'darwin-launchd'
+      ? buildAutostartPlist(ROOT, process.execPath)
+      : buildAutostartVbs(ROOT, process.execPath);
+    atomicWrite(filePath, content);
+    console.log(paint(C.green, '✓ 已开启开机后台自启（登录后静默启动网关与管理 Web，不弹终端与浏览器）'));
+    console.log(paint(C.dim, `  ${label}: ${filePath}`));
     return;
   }
   if (!existsSync(filePath)) {
